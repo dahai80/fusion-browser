@@ -1,0 +1,7 @@
+.build/
+.swiftpm/
+.ruff_cache/
+.remember/
+*.xcodeproj/
+DerivedData/
+.fusion-browser/

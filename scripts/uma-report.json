@@ -1,0 +1,34 @@
+{
+  "ts": 1787757678,
+  "ok": true,
+  "sessions": 10,
+  "actions": {
+    "ok": 100,
+    "fail": 0,
+    "total": 100
+  },
+  "browser_rss_kb": {
+    "start": 32176,
+    "mid": 70560,
+    "end": 70896,
+    "after_close": 74304,
+    "delta": 38720,
+    "cap_kb": 1536000
+  },
+  "mlx": {
+    "model_memory_bytes_start": 9362483363.0,
+    "model_memory_bytes_end": 9362483363.0,
+    "delta": 0.0,
+    "requests_start": 39.0,
+    "requests_end": 43.0,
+    "ping_start_ok": true,
+    "ping_end_ok": true,
+    "served_during": true
+  },
+  "assertions": {
+    "browser_rss_under_cap": true,
+    "mlx_memory_stable": true,
+    "mlx_served": true
+  },
+  "errors_sample": []
+}

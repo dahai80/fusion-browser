@@ -1,0 +1,43 @@
+{
+  "ts": 1787757444,
+  "pid": 72585,
+  "workload": {
+    "scroll": 20,
+    "screenshot": 20,
+    "click": 20
+  },
+  "note": "evaluate excluded (gated capability, not in default caps); click counts ok responses only; click targets rotated to avoid FR-13 repeat-break",
+  "latency_ms": {
+    "scroll": {
+      "count": 20,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "screenshot": {
+      "count": 20,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "click": {
+      "count": 20,
+      "p50": 0,
+      "p95": 0,
+      "max": 0,
+      "errors": 0,
+      "error_codes": []
+    }
+  },
+  "axtree": {
+    "markdown_p95_chars": 673,
+    "avg_interactive_nodes": 4.0,
+    "chars_per_node": 168.2
+  },
+  "host_rss_kb": {
+    "samples": 40,
+    "min": 66048,
+    "max": 66176,
+    "delta": 128
+  }
+}

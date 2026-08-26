@@ -1,0 +1,106 @@
+{
+  "ts": 1787757950,
+  "ok": true,
+  "actions": {
+    "ok": 1000,
+    "fail": 0,
+    "total": 1000
+  },
+  "rss_series": [
+    {
+      "action": 0,
+      "rss_kb": 66352
+    },
+    {
+      "action": 50,
+      "rss_kb": 66624
+    },
+    {
+      "action": 100,
+      "rss_kb": 66768
+    },
+    {
+      "action": 150,
+      "rss_kb": 66800
+    },
+    {
+      "action": 200,
+      "rss_kb": 66832
+    },
+    {
+      "action": 250,
+      "rss_kb": 66880
+    },
+    {
+      "action": 300,
+      "rss_kb": 66928
+    },
+    {
+      "action": 350,
+      "rss_kb": 66976
+    },
+    {
+      "action": 400,
+      "rss_kb": 66992
+    },
+    {
+      "action": 450,
+      "rss_kb": 67008
+    },
+    {
+      "action": 500,
+      "rss_kb": 67024
+    },
+    {
+      "action": 550,
+      "rss_kb": 67024
+    },
+    {
+      "action": 600,
+      "rss_kb": 67056
+    },
+    {
+      "action": 650,
+      "rss_kb": 67072
+    },
+    {
+      "action": 700,
+      "rss_kb": 67072
+    },
+    {
+      "action": 750,
+      "rss_kb": 67072
+    },
+    {
+      "action": 800,
+      "rss_kb": 67088
+    },
+    {
+      "action": 850,
+      "rss_kb": 67136
+    },
+    {
+      "action": 900,
+      "rss_kb": 67136
+    },
+    {
+      "action": 950,
+      "rss_kb": 67152
+    },
+    {
+      "action": 1000,
+      "rss_kb": 70464
+    }
+  ],
+  "rss_kb": {
+    "first_quartile_mean": 66675,
+    "last_quartile_mean": 67795,
+    "span": 4112,
+    "jitter_tol_kb": 30720
+  },
+  "assertions": {
+    "no_monotonic_rise": true,
+    "all_actions_ok": true
+  },
+  "errors_sample": []
+}
