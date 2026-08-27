@@ -159,13 +159,18 @@ The six infra modules (each a single file, see README source map):
   fills every placeholder, starves the rest, so `expectFp` gets the nodeId →
   fingerprint never matches → EVERY click/type returns `node_stale`. This was the
   most severe Phase 4-found bug; it broke the entire click+type contract.
-- **`create` with `initial_url` and `close` MUST run AppKit ops on main.**
-  `WKWebView.load` in `create` and `stopLoading`/`removeFromSuperview`/`hostWindow.close`
-  in `close` trap (exit 133) when called off the sessionmgr background queue.
-  `create` wraps the navigate in `DispatchQueue.main.async`; `FBSession.close`
-  dispatches `destroy()` to main via `DispatchQueue.main.sync`. `manager.close`
-  extracts the session under the queue lock FIRST, then tears down the webview on
-  main WITHOUT holding the queue lock (avoids main↔sessionmgr lock inversion).
+- **`create` with `initial_url`, `close`, AND execute navigate MUST run AppKit
+  ops on main.** `WKWebView.load` traps (exit 133) off-main. `create` wraps the
+  navigate in `DispatchQueue.main.async`; `FBSession.close` dispatches
+  `destroy()` to main via `DispatchQueue.main.sync`; `manager.close` extracts
+  the session under the queue lock FIRST, then tears down the webview on main
+  WITHOUT holding the queue lock (avoids main↔sessionmgr lock inversion).
+  Execute navigate hits the SAME trap: `ActionDriver.dispatch` runs inside the
+  `runWithWatchdog` block on `DispatchQueue.global()`, so `WebView.navigate`
+  must main-hop `wv.load` when off-main (sync semaphore wait; never sync-wait
+  ON main). Covers UDS + CDP — both route through `runWithWatchdog`. Verified
+  via `scripts/navigate_execute_smoke.py` (create WITHOUT initial_url, then
+  execute navigate).
 - **Rust FFI ownership = Rust-allocates / Rust-frees** (PRD §4.3 module 5, flag
   `useRustCore`, default OFF). `fb_core_compile` returns a `Box::into_raw`
   buffer; `FBCoreBridge.compile` copies it into a Swift-owned `Data` and calls

@@ -113,6 +113,7 @@ P4-2 RSS self-restart enable example:
 | `scripts/uma_coexist.py` | P4-4 UMA coexistence (10 sessions×100 actions + mlx inference concurrent) | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action long-run no-leak (RSS quartile comparison) | `scripts/longrun-report.json` |
 | `scripts/parity_smoke.py` | Rust-core live parity (useRustCore false vs true, same page → byte-identical `ax_tree_markdown`) | terminal PASS/FAIL |
+| `scripts/navigate_execute_smoke.py` | navigate-via-execute SIGTRAP fix (execute navigate off-main → engine stays alive, page loads) | terminal PASS/FAIL |
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 

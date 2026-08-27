@@ -102,6 +102,7 @@ P4-2 RSS 自重启启用示例：
 | `scripts/uma_coexist.py` | P4-4 UMA 共存（10 session×100 动作 + mlx 推理并发） | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action 长跑无泄漏（RSS 四分位对比） | `scripts/longrun-report.json` |
 | `scripts/parity_smoke.py` | Rust core live 对齐（useRustCore false vs true，同页 → `ax_tree_markdown` 字节一致） | 终端 PASS/FAIL |
+| `scripts/navigate_execute_smoke.py` | navigate-via-execute SIGTRAP 修复验证（execute navigate 离主线程 → 引擎存活、页面加载） | 终端 PASS/FAIL |
 
 均驱动 release 二进制（`swift build -c release` 后执行），live WKWebView 不在 `swift test` 覆盖范围。
 
