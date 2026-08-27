@@ -1,22 +1,30 @@
 # Development Guide
 
 > fusion-browser — contributor conventions and hard constraints.
-> Doc version: Phase 4 (2026-08-27).
+> Doc version: Phase 4 + Rust core (2026-08-27).
 
 ## 1. Build / Test / Run
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release          # binary -> .build/release/fusion-browser
-swift test                      # full suite (deterministic unit tests only)
-swift test --filter CDPServerTests   # single test class
-swift test --filter AXTreeTests/StableMappingTests   # single test method
+                                # (FBCoreRustBuilder plugin runs cargo build --release first)
+swift test --disable-sandbox    # full suite, 99 tests (--disable-sandbox REQUIRED:
+                                #  plugin runs cargo + writes the package tree)
+swift test --disable-sandbox --filter CDPServerTests   # single test class
+swift test --disable-sandbox --filter AXTreeTests/StableMappingTests   # single method
+cargo test --manifest-path rust/fb-core/Cargo.toml     # Rust-side parity fixtures (separate stack)
 .build/release/fusion-browser   # run engine (UDS server, CDP off by default)
 ```
 
-No venv / Python needed for build (pure Swift). Python `scripts/` are verify
-harnesses (smoke_client, perf_bench, uma_coexist, longrun_leak,
-verify_nonpersistent), NOT part of the build.
+No venv / Python needed for build (pure Swift). A Rust toolchain
+(`cargo`/`rustc`, arm64-apple-darwin) is REQUIRED — the `FBCoreRustBuilder`
+plugin runs `cargo build --release` on every `swift build` (early Rust-drift
+detection) and links `libfb_core.a` into the binary; the Rust path is *called*
+only when `useRustCore` is set. `--disable-sandbox` is mandatory for build/test
+because the plugin writes the package tree, which the sandbox denies. Python
+`scripts/` are verify harnesses (smoke_client, perf_bench, uma_coexist,
+longrun_leak, verify_nonpersistent, parity_smoke), NOT part of the build.
 
 ## 2. Coding Conventions
 
@@ -64,6 +72,19 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
   `replacingOccurrences(of: "__ARG__", with:)` (replaces ALL occurrences per arg):
   with multi-arg scripts the first arg fills every placeholder and starves the
   rest, so the fingerprint never matches → EVERY click/type returns `node_stale`.
+- **Rust FFI ownership = Rust-allocates / Rust-frees** (PRD §4.3 module 5).
+  `fb_core_compile` returns a `Box::into_raw` buffer; the Swift bridge
+  (`FBCoreBridge.swift`) copies it into a Swift-owned `Data` and calls
+  `fb_core_free` immediately — NEVER `Data(bytesNoCopy:)` (defers the free past
+  lifetime, races the two allocators). Every Rust export is wrapped in
+  `catch_unwind` → `FB_ERR_PANIC`, so a Rust panic degrades visibly (logs +
+  falls back to the Swift reducer) and never crashes the host. `panic = "unwind"`
+  is mandatory in `Cargo.toml` — do NOT set `panic = "abort"`. The cTarget
+  `FBCoreRust` provides `import FBCoreRust` (committed `fb_core.h` +
+  `module.modulemap`); gate the import with `#if canImport(FBCoreRust)`. The
+  staticlib is built + linked on every `swift build` (build always, link always,
+  call conditionally on `useRustCore`), which is why `--disable-sandbox` is
+  required. See `docs/ARCHITECTURE.md` §8.
 
 ## 4. Testing Boundaries
 
@@ -80,6 +101,17 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
   `uma_coexist.py`, `longrun_leak.py`) run against the release binary and write
   `scripts/*-report.json` (gitignored). Run them for integration verification;
   clean up process data after, keep only final outputs + logs.
+- **Rust core parity gate** (`Tests/FusionBrowserTests/RustCoreParityTests.swift`,
+  5 tests) calls `FBCoreBridge.compileJSON` directly, bypassing the `useRustCore`
+  flag, against the shared fixture `rust/fb-core/tests/parity.json` (9 cases);
+  it skips (not fails) if the staticlib is not linked. The Rust side is covered
+  separately by `cargo test --manifest-path rust/fb-core/Cargo.toml` (own stack,
+  PRD L115). Live parity is verified by `scripts/parity_smoke.py` (release
+  binary, two configs on the same page → `ax_tree_markdown` byte-identical). The
+  Rust markdown must be byte-exact vs the Swift `FBAXTreeReducer` (curly quotes
+  U+201C/U+201D, `[@eN]` prefix, sorted `hiddenFlags` keys + optional
+  `render:hidden`) — a mismatch fails loudly (Rule 12), Rust drift is caught
+  here, not in production.
 - **Test fidelity matters.** A mock that emits a shape the real engine never
   produces gives false confidence. Mocks MUST match the real wire schema (e.g.
   bare `eN` node ids, not `@eN`) — see `docs/PROTOCOL.md` §4.
@@ -145,7 +177,8 @@ A new action touches several points — keep them in sync:
 - **`architecture/agent-studio-integration-contract-0826.md`** is the consumer
   contract — update it when the wire schema or action contract changes.
 - **Keep the test count and landed fixes current** in `README.md` /
-  `README_CN.md` (e.g. node-id bare `eN` fix, test count). Stale numbers erode
+  `README_CN.md` (e.g. node-id bare `eN` fix, Rust core engine, test count). The
+  suite is 99 tests (90 original + 5 `RustCoreParityTests` + 4 `FBCoreWorkerPoolTests`); stale numbers erode
   trust faster than no number.
 - **Clean up process data after verification** — keep only final outputs + logs.
   `scripts/*-report.json` is gitignored; do not commit transient run artifacts.

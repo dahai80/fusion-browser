@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "name": "empty_nodes",
+      "input": {"nodes": [], "url": "https://example.com", "title": "Empty", "nodesAudited": 0, "hiddenNodesPurged": 0, "matchedRules": []},
+      "expected_markdown": "# Page\nurl: https://example.com\ntitle: Empty\n\n# 交互节点"
+    },
+    {
+      "name": "plain_button",
+      "input": {"nodes": [{"nodeId": "e1", "role": "button", "name": "Login", "isDisabled": false, "currentValue": "", "fingerprint": "f", "docPath": "d", "hiddenFlags": {}, "renderHidden": false}], "url": "https://x", "title": "T", "nodesAudited": 1, "hiddenNodesPurged": 0, "matchedRules": []},
+      "expected_markdown": "# Page\nurl: https://x\ntitle: T\n\n# 交互节点\n- [@e1] button “Login”"
+    },
+    {
+      "name": "disabled_password",
+      "input": {"nodes": [{"nodeId": "e2", "role": "textbox", "name": "密码", "isDisabled": true, "currentValue": "********", "fingerprint": "f", "docPath": "d", "hiddenFlags": {}, "renderHidden": false}], "url": "https://login", "title": "登录", "nodesAudited": 1, "hiddenNodesPurged": 0, "matchedRules": []},
+      "expected_markdown": "# Page\nurl: https://login\ntitle: 登录\n\n# 交互节点\n- [@e2] textbox “密码” (val:********) [disabled]"
+    },
+    {
+      "name": "empty_name_val_only",
+      "input": {"nodes": [{"nodeId": "e3", "role": "textbox", "name": "", "isDisabled": false, "currentValue": "hello", "fingerprint": "f", "docPath": "d", "hiddenFlags": {}, "renderHidden": false}], "url": "https://v", "title": "V", "nodesAudited": 1, "hiddenNodesPurged": 0, "matchedRules": []},
+      "expected_markdown": "# Page\nurl: https://v\ntitle: V\n\n# 交互节点\n- [@e3] textbox (val:hello)"
+    },
+    {
+      "name": "purged_sorted_render_last",
+      "input": {"nodes": [{"nodeId": "e4", "role": "link", "name": "", "isDisabled": false, "currentValue": "", "fingerprint": "f", "docPath": "d", "hiddenFlags": {"opacity:0": true, "display:none": true}, "renderHidden": true}], "url": "https://p", "title": "P", "nodesAudited": 1, "hiddenNodesPurged": 1, "matchedRules": ["display:none", "opacity:0", "render:hidden"]},
+      "expected_markdown": "# Page\nurl: https://p\ntitle: P\n\n# 交互节点\n- [@e4] link {purged:display:none,opacity:0,render:hidden}"
+    },
+    {
+      "name": "purged_no_render",
+      "input": {"nodes": [{"nodeId": "e5", "role": "button", "name": "", "isDisabled": false, "currentValue": "", "fingerprint": "f", "docPath": "d", "hiddenFlags": {"display:none": true}, "renderHidden": false}], "url": "https://n", "title": "N", "nodesAudited": 1, "hiddenNodesPurged": 1, "matchedRules": ["display:none"]},
+      "expected_markdown": "# Page\nurl: https://n\ntitle: N\n\n# 交互节点\n- [@e5] button {purged:display:none}"
+    },
+    {
+      "name": "multi_node_mixed",
+      "input": {"nodes": [{"nodeId": "e1", "role": "textbox", "name": "用户名", "isDisabled": false, "currentValue": "", "fingerprint": "f", "docPath": "d", "hiddenFlags": {}, "renderHidden": false}, {"nodeId": "e2", "role": "textbox", "name": "密码", "isDisabled": false, "currentValue": "********", "fingerprint": "f", "docPath": "d", "hiddenFlags": {}, "renderHidden": false}, {"nodeId": "e3", "role": "button", "name": "", "isDisabled": false, "currentValue": "", "fingerprint": "f", "docPath": "d", "hiddenFlags": {"display:none": true}, "renderHidden": false}], "url": "https://login.example.com", "title": "登录", "nodesAudited": 3, "hiddenNodesPurged": 1, "matchedRules": ["display:none"]},
+      "expected_markdown": "# Page\nurl: https://login.example.com\ntitle: 登录\n\n# 交互节点\n- [@e1] textbox “用户名”\n- [@e2] textbox “密码” (val:********)\n- [@e3] button {purged:display:none}"
+    },
+    {
+      "name": "render_hidden_only_no_static",
+      "input": {"nodes": [{"nodeId": "e6", "role": "button", "name": "", "isDisabled": false, "currentValue": "", "fingerprint": "f", "docPath": "d", "hiddenFlags": {}, "renderHidden": true}], "url": "https://r", "title": "R", "nodesAudited": 1, "hiddenNodesPurged": 1, "matchedRules": ["render:hidden"]},
+      "expected_markdown": "# Page\nurl: https://r\ntitle: R\n\n# 交互节点\n- [@e6] button {purged:render:hidden}"
+    },
+    {
+      "name": "all_suffixes_unicode",
+      "input": {"nodes": [{"nodeId": "e7", "role": "combobox", "name": "选项", "isDisabled": true, "currentValue": "已选", "fingerprint": "f", "docPath": "d", "hiddenFlags": {"visibility:hidden": true, "aria-hidden:true": true}, "renderHidden": true}], "url": "https://u", "title": "测试", "nodesAudited": 1, "hiddenNodesPurged": 1, "matchedRules": ["visibility:hidden", "aria-hidden:true", "render:hidden"]},
+      "expected_markdown": "# Page\nurl: https://u\ntitle: 测试\n\n# 交互节点\n- [@e7] combobox “选项” (val:已选) [disabled] {purged:aria-hidden:true,visibility:hidden,render:hidden}"
+    }
+  ]
+}

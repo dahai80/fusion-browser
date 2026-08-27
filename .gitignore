@@ -6,3 +6,5 @@
 DerivedData/
 .fusion-browser/
 scripts/*-report.json
+rust/fb-core/target/
+rust/fb-core/dist/

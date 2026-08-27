@@ -13,7 +13,7 @@ emitter (T3.3) + visual-grounding fallback via fusion-mlx VLM (T3.4); Phase 4 ad
 FR-04 non-persistence verification (P4-1) + RSS watchdog/OOM self-heal (P4-2) +
 perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action
 long-run no-leak (P4-5). T3.1 (agent-studio 对接) is cross-project: contract doc +
-issue only on this side, code lands in fusion-agent-studio. Build green, 89 tests
+issue only on this side, code lands in fusion-agent-studio. Build green, 99 tests
 pass, end-to-end UDS smoke pass, CDP `:9222` smoke pass, T3.4 verified via real VLM
 smoke, Phase 4 all verified via release binary + Python verify scripts
 (`scripts/verify_nonpersistent.py` / `perf_bench.py` / `uma_coexist.py` /
@@ -29,14 +29,19 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser
-swift test                 # 89 tests, asyncio not used here (pure Swift)
-swift test --filter CDPServerTests
+                           # (FBCoreRustBuilder plugin runs cargo build --release first)
+swift test --disable-sandbox   # 99 tests (--disable-sandbox REQUIRED: plugin runs cargo)
+swift test --disable-sandbox --filter CDPServerTests
+cargo test --manifest-path rust/fb-core/Cargo.toml   # Rust-side parity fixtures
 .build/release/fusion-browser
 ```
 
-No venv / Python needed for build (Swift only). The Python `scripts/` are verify
-harnesses (smoke_client / perf_bench / uma_coexist / longrun_leak /
-verify_nonpersistent), not part of the build.
+No venv / Python needed for build (Swift only); a Rust toolchain
+(`cargo`/`rustc`) is REQUIRED — the `FBCoreRustBuilder` plugin builds
+`libfb_core.a` on every `swift build` and links it always (called only when
+`useRustCore` is set, default off). `--disable-sandbox` is mandatory for
+build/test. The Python `scripts/` are verify harnesses (smoke_client / perf_bench
+/ uma_coexist / longrun_leak / verify_nonpersistent), not part of the build.
 
 **WKWebView cannot run under `swift test`** — no main run loop means
 `evaluateJSSync`/`screenshotSync` semaphores deadlock (completion handlers dispatch
@@ -49,6 +54,9 @@ test target — they will hang the suite.
 Config (optional): `~/.fusion-browser/config.json` — partial JSON OK, missing
 fields fall back to `FBEngineConfig.default`. Keys: `socketPath`, `cdpEnabled`,
 `cdpPort`, `authToken`, `logLevel` (debug/info/warn/error), `allowedOrigins`,
+`useRustCore` (PRD §4.3 module 5, default `false` — routes the AXTree compile
+markdown+nodes+audit through the Rust core staticlib over FFI; on any FFI/decode
+failure the Rust path degrades visibly and falls back to the Swift reducer),
 `visualLocator` (T3.4 visual-grounding fallback, default OFF — sub-keys
 `endpoint`/`model`/`timeoutMs`/`enabled`; when enabled the VLM must be loaded in
 fusion-mlx first; `model` is the registered ID with `--` not `/`, e.g.
@@ -158,6 +166,28 @@ The six infra modules (each a single file, see README source map):
   dispatches `destroy()` to main via `DispatchQueue.main.sync`. `manager.close`
   extracts the session under the queue lock FIRST, then tears down the webview on
   main WITHOUT holding the queue lock (avoids main↔sessionmgr lock inversion).
+- **Rust FFI ownership = Rust-allocates / Rust-frees** (PRD §4.3 module 5, flag
+  `useRustCore`, default OFF). `fb_core_compile` returns a `Box::into_raw`
+  buffer; `FBCoreBridge.compile` copies it into a Swift-owned `Data` and calls
+  `fb_core_free` immediately — NEVER `Data(bytesNoCopy:)` (defers the free past
+  lifetime, races the host and Rust allocators). Every Rust export is wrapped in
+  `catch_unwind` → `FB_ERR_PANIC`; a Rust panic degrades visibly (logs + falls
+  back to the Swift `FBAXTreeReducer`) and never crashes the host. `panic =
+  "unwind"` is mandatory in `rust/fb-core/Cargo.toml` (NOT `panic = "abort"`).
+  The `FBCoreRustBuilder` `BuildToolPlugin` runs `cargo build --release` and
+  links `libfb_core.a` on every `swift build` (build always, link always, call
+  conditionally) — this is why `--disable-sandbox` is required for build/test.
+  The dispatch seam is `FBAXTreeExtractor.extract`: `mapping.install` (always
+  Swift) runs first, then if `useRustCore` the markdown+nodes+audit come from
+  `FBCoreBridge.compileJSON`; nil → log + fall back to Swift reducer. Parity
+  gate: `rust/fb-core/tests/parity.json` shared by `cargo test` +
+  `RustCoreParityTests.swift` (5 tests, bypass the flag, skip if staticlib
+  absent) + `scripts/parity_smoke.py` (live, byte-identical). Rust Worker Pool
+  (PRD §4.2) LANDED: `FBCoreWorkerPool` (N=cores-2, floor 2) bounds parallel
+  compiles via a `DispatchSemaphore`; `extract()` routes the Rust compile through
+  `FBCoreWorkerPool.shared.compile`, on pool fail falls back to inline
+  `FBCoreBridge.compileJSON`. Pool is a perf guard, never correctness. See
+  `docs/ARCHITECTURE.md` §8.
 - **`FBMemoryWatchdog` guards host-side RSS only, not WebContent.** It samples
   `mach_task_basic_info.resident_size` (host process, excludes the separate
   WebContent procs bounded by FR-08 quota). One-shot breach: fires `onBreach` once,

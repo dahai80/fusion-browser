@@ -1,0 +1,5 @@
+module FBCoreRust {
+    umbrella header "fb_core.h"
+    export *
+    module * { export * }
+}

@@ -10,7 +10,7 @@ macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与
 
 ## 当前状态（Phase 4 生产化加固已落地）
 
-Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，90 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
+Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，99 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
 
 **Phase 1 已落地**
 - Swift 6 SPM 包，Headless/Headed WKWebView 封装（`nonPersistent` dataStore 隔离，共享 `WKProcessPool`）
@@ -45,21 +45,28 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 **Phase-4 后修复已落地**
 - 节点 id 格式（commit `9b3405e`，2026-08-27）：wire/结构化节点 id 为裸 `eN`（`interactive_nodes[].node_id`、`target_node_id`）；Markdown 降维 `ax_tree_markdown` 显示 `[@eN]` 仅供 LLM 可读。LLM 原样转发 `@e1` 会 `__fbMap` 未命中 → `node_stale`。`FBActionDriver.execute` 现在在 admit/resolve/JS 前一次性剥离 `target_node_id` 前导 `@`，故 `e1` 与 `@e1` 均可解析。调用方应发裸 `eN`。见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4。
 
+**Rust 核心引擎已落地（PRD §4.3 module 5，T1.4 覆盖）**
+- 标志位门控的并行 Rust 路径，复刻 AXTree 编译器（JSON 解码 → markdown 降维 → wire 节点 → audit）。crate `rust/fb-core/`（`crate-type = ["staticlib","rlib"]`，serde + serde_json，`panic = "unwind"` 以支持 `catch_unwind`）。C-ABI FFI = `fb_core_compile` + `fb_core_free` + `fb_core_estimate_tokens` + `fb_core_version`；所有权 = Rust 分配/Rust 释放（`Box::into_raw`/`from_raw`），每个导出裹 `catch_unwind` → `FB_ERR_PANIC`（永不拖垮宿主）
+- SPM 接线：`BuildToolPlugin` `FBCoreRustBuilder` 跑 `cargo build --release` → 把 `libfb_core.a` 平铺到 `rust/fb-core/dist/`；cTarget `FBCoreRust`（提交版 `fb_core.h` + `module.modulemap`）提供 `import FBCoreRust`；可执行体 + 测试目标均链 `-lfb_core`。永远编译、永远链接、**条件调用**——静态库每次 `swift build` 都编译（早暴露 Rust 漂移），但 Swift 代码只在标志位开时调用
+- 分派点：`FBAXTreeExtractor.extract(webview:)`——`mapping.install` 之后（mapping 永远走 Swift），若 `useRustCore` 则 markdown+节点+audit 取自 `FBCoreBridge.compileJSON`；nil（panic/解码失败）时显式降级 + 回退 Swift reducer。默认关 → Swift 路径仍活
+- 对齐门控（零回归）：`rust/fb-core/tests/parity.json`（9 用例）由 `cargo test` + `Tests/FusionBrowserTests/RustCoreParityTests.swift`（5 测试，直调 bridge、绕过标志位、无静态库则跳过）共享。`swift test` = 99 绿。Live 冒烟 `scripts/parity_smoke.py` 驱动 release 二进制跑两配置（useRustCore false vs true）同页 → `ax_tree_markdown` 字节一致（实测 len=595，5 节点含脱敏密码 + purge 的隐藏链接）
+- 配置键 `useRustCore`（默认 `false`）。Rust Worker Pool（PRD §4.2）已落地——`FBCoreWorkerPool`（N=cores-2，下限 2）限流并行 Rust 编译，避免满载 FR-08（至 16 session）经 ActionDriver watchdog 的无界 `DispatchQueue.global()` 过度抢占 CPU。FIFO 提交 + `DispatchSemaphore` 限流 + 每 task done 信号量；入队/关停失败时回退内联 `FBCoreBridge.compileJSON`（pool 是性能护栏，非正确性依赖）。FR-12 指标：`rustpool.enqueued`/`active`/`completed`/`fallback` + `rustpool.compile` 延迟。`extract()` 经 `FBCoreWorkerPool.shared.compile` 走 Rust 编译
+
 **未做（按路线图）**
-- Rust 核心引擎（T1.4 评估：纯 Swift 可能足够，Phase 3 视渲染后可见性分析 CPU 负载决定）
 - T3.1 agent-studio 全对接：跨项目，本侧只出契约文档 + issue，落地在 fusion-agent-studio（已上游经 PR #235 落地；我的跟踪 issue #237 关为重复；#241 开，测试保真度）
 
 ## 构建与测试
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
-swift build                # debug
+swift build                # debug（经 FBCoreRustBuilder 插件顺带跑 cargo build --release）
 swift build -c release     # release -> .build/release/fusion-browser
-swift test                 # 90 tests
-swift test --filter CDPServerTests   # 单个测试套
+swift test --disable-sandbox   # 99 测试（--disable-sandbox 必须：插件跑 cargo、写包目录树）
+swift test --disable-sandbox --filter CDPServerTests   # 单个测试套
+cargo test --manifest-path rust/fb-core/Cargo.toml     # Rust 侧对齐 fixture（独立栈，PRD L115）
 ```
 
-要求：macOS 14+，Xcode CLI Tools（已验证 Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64）。
+要求：macOS 14+，Xcode CLI Tools（已验证 Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64），Rust 工具链（`cargo`/`rustc`，arm64-apple-darwin）用于 `rust/fb-core` 静态库。
 
 > 注：WKWebView 完成回调依赖主 run loop，`swift test` 无主循环 → `evaluateJSSync`/`screenshotSync` 信号量会死锁。故 live WKWebView 行为（AX walker 实跑、截图、真实导航）不在 `swift test` 内验证，靠确定性单元测试（规则目录/reducer/translator/codec）+ 起二进制 + Python smoke 客户端覆盖。见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §4。
 
@@ -79,7 +86,7 @@ JSON
 
 `logLevel`：debug/info/warn/error。日志同时写 `os_log`（Console.app 可查 `com.fusion.browser`）与 stderr。
 
-配置键：`socketPath`、`cdpEnabled`、`cdpPort`、`authToken`、`logLevel`、`allowedOrigins`（EVALUATE origin 白名单，空=不限）、`visualLocator`（T3.4 视觉定位兜底，默认关；启用需先在 fusion-mlx 加载 VLM，子键 `endpoint`/`model`/`timeoutMs`/`enabled`）、`memoryWatchdog`（P4-2 RSS 自重启，默认关；子键 `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`，action=`close_sessions`|`exit`）、`guards`（FR-13 调度护栏，子键 `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`）。
+配置键：`socketPath`、`cdpEnabled`、`cdpPort`、`authToken`、`logLevel`、`allowedOrigins`（EVALUATE origin 白名单，空=不限）、`useRustCore`（PRD §4.3 module 5，默认 `false`；把 AXTree 编译的 markdown+节点+audit 走 Rust core 静态库；任何 FFI/解码失败时 Rust 路径显式降级并回退 Swift reducer）、`visualLocator`（T3.4 视觉定位兜底，默认关；启用需先在 fusion-mlx 加载 VLM，子键 `endpoint`/`model`/`timeoutMs`/`enabled`）、`memoryWatchdog`（P4-2 RSS 自重启，默认关；子键 `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`，action=`close_sessions`|`exit`）、`guards`（FR-13 调度护栏，子键 `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`）。
 
 P4-2 RSS 自重启启用示例：
 ```json
@@ -94,6 +101,7 @@ P4-2 RSS 自重启启用示例：
 | `scripts/perf_bench.py` | P4-3 性能基准（scroll/screenshot/click 延迟 + AXTree 压缩比） | `scripts/perf-report.json` |
 | `scripts/uma_coexist.py` | P4-4 UMA 共存（10 session×100 动作 + mlx 推理并发） | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action 长跑无泄漏（RSS 四分位对比） | `scripts/longrun-report.json` |
+| `scripts/parity_smoke.py` | Rust core live 对齐（useRustCore false vs true，同页 → `ax_tree_markdown` 字节一致） | 终端 PASS/FAIL |
 
 均驱动 release 二进制（`swift build -c release` 后执行），live WKWebView 不在 `swift test` 覆盖范围。
 
@@ -152,10 +160,16 @@ P4-2 RSS 自重启启用示例：
 | `UDSServer.swift` | FR-09/10 POSIX socket UDS 服务端 + 每 client 读循环 + 鉴权路由 |
 | `CDPServer.swift` | T2.3/T3.3 CDP-WS shim：POSIX TCP + HTTP 发现 + WS 升级 + 帧编解码 + `FBCDPTranslator`（CDP 方法→ActionDriver，扩 Network/Console/Emulation/Page.lifecycleEvent/DOM）+ `FBCDPEventEmitter`（事件解耦，可确定性单测） |
 | `VisualLocator.swift` | T3.4 视觉定位兜底：截图→fusion-mlx VLM `/v1/chat/completions` 预测 `{x,y}` + OOB 防护；可插拔 `FBHTTPClient` |
+| `FBCoreBridge.swift` | PRD §4.3 module 5 Rust core FFI 桥：`compile`/`compileJSON`（markdown+节点+audit）+ `version` + `estimateTokens`；Rust 分配/Rust 释放所有权，Rust 缓冲拷进 Swift `Data` 后再 `fb_core_free`（绝不用 `bytesNoCopy`）；panic/解码失败返 nil → 调用方回退 Swift |
+| `FBCoreWorkerPool.swift` | PRD §4.2 Rust Worker Pool：经 `DispatchSemaphore` 在并发队列上限流并行 Rust 编译（N=cores-2，下限 2）；入队/关停失败回退内联 `FBCoreBridge.compileJSON`（性能护栏，非正确性依赖）；FR-12 指标 `rustpool.enqueued`/`active`/`completed`/`fallback` + `rustpool.compile` 延迟 |
+| `Sources/FBCoreRust/` | cTarget：提交版 `include/fb_core.h`（C-ABI 契约）+ `module.modulemap` + `fb_core_stubs.c` 锚点；`import FBCoreRust` 由 `#if canImport(FBCoreRust)` 守卫 |
+| `Plugins/FBCoreRustBuilder/` | `BuildToolPlugin`：跑 `cargo build --release`，把 `libfb_core.a` 平铺到 `rust/fb-core/dist/`；输入 = `Cargo.toml` + `src/**`，SPM 只在 Rust 源变更时重跑 cargo |
+| `rust/fb-core/` | Rust crate `fb_core`（`staticlib`+`rlib`，serde + serde_json，`panic = "unwind"`）：`compile.rs`（解码→markdown+节点+audit）+ `markdown.rs`（字节对齐 reducer）+ `token.rs`（estimate_tokens）+ `tests/parity.json`（9 用例共享 fixture） |
 
 ## 路线图（详见 PRD §4）
 
 - Phase 1（基座）：引擎基座 + 六大基础设施 + action 透传 + 分档 watchdog ✓
 - Phase 2：AXTree 提炼器 + 反注入 Sanitizer + CDP 兼容层（4 Domain）+ 凭据闭环 ✓
 - Phase 3：多节点适配（T3.2）+ CDP 扩 Domain + 事件（T3.3）+ 视觉定位兜底（T3.4）✓；agent-studio 全对接（T3.1）跨项目，已上游落地
-- Phase 4（本提交，生产化加固）：无痕落盘验收（P4-1，FR-04）+ RSS 自重启（P4-2）+ 性能基准套件（P4-3）+ UMA 共存基线（P4-4，PRD T1.5）+ 1000-action 长跑无泄漏（P4-5）✓
+- Phase 4（生产化加固）：无痕落盘验收（P4-1，FR-04）+ RSS 自重启（P4-2）+ 性能基准套件（P4-3）+ UMA 共存基线（P4-4，PRD T1.5）+ 1000-action 长跑无泄漏（P4-5）✓
+- Rust 核心引擎（PRD §4.3 module 5，T1.4 覆盖）：标志位门控 `fb_core` 静态库 + C-ABI FFI + `FBCoreBridge` + `FBCoreWorkerPool`（PRD §4.2，限流并行编译），对齐门控（cargo test + `RustCoreParityTests` + live 冒烟），默认关 ✓

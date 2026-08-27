@@ -15,8 +15,14 @@ public struct FBNodeMapping {
 public final class FBAXTreeExtractor {
     private let log = FBLogger.shared
     public let mapping = FBStableMapping()
+    // PRD §4.3 module 5: route the markdown+nodes+audit compile through the Rust
+    // core engine when available. Default off (Swift reducer stays live). On any
+    // FFI/decode failure the Rust path degrades visibly and falls back to Swift.
+    private let useRustCore: Bool
 
-    public init() {}
+    public init(useRustCore: Bool = false) {
+        self.useRustCore = useRustCore
+    }
 
     // T2.1: run injected walker via FBWebView, parse FBExtractResult.
     // Sync wrapper: blocks on semaphore (called from ActionDriver watchdog block on bg queue).
@@ -35,10 +41,21 @@ public final class FBAXTreeExtractor {
             log.warn("AXTree", "decode walker failed: \(error)")
             return (nil, "", SecurityAuditResult(), .internalError)
         }
-        // Install stable mapping from extracted nodes.
+        // Install stable mapping from extracted nodes (stays Swift either way —
+        // Rust does not own the JS WeakRef mapping).
         mapping.install(res.nodes)
         // Build reduced interactive nodes for the wire schema (T2.1 compression).
         let reduced = res.nodes.map { FBAXTreeReducer.toWireNode($0) }
+        // Rust core path (PRD §4.3 module 5 + §4.2 worker pool): compile
+        // markdown+nodes+audit via FFI through the bounded worker pool. On nil
+        // (pool fail / panic / decode fail) degrade visibly + fall back to Swift.
+        if useRustCore, let rust = FBCoreWorkerPool.shared.compile(data) {
+            log.info("AXTree", "rust core compile ok nodes=\(res.nodes.count) purged=\(rust.audit.hiddenNodesPurged) rules=\(rust.audit.matchedRules)")
+            _ = reduced
+            return (res, rust.markdown, rust.audit, nil)
+        } else if useRustCore {
+            log.warn("AXTree", "rust core compile failed; falling back to Swift reducer")
+        }
         let md = FBAXTreeReducer.toMarkdown(res)
         let audit = SecurityAuditResult(nodesAudited: res.nodesAudited,
                                         hiddenNodesPurged: res.hiddenNodesPurged,

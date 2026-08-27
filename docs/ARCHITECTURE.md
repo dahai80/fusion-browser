@@ -1,7 +1,7 @@
 # Architecture
 
 > fusion-browser — macOS native controlled browser engine.
-> Doc version: Phase 4 (2026-08-27). Authoritative spec: `~/fusion/architecture/fusion-browser-prd-0826.md` (v2.0).
+> Doc version: Phase 4 + Rust core (2026-08-27). Authoritative spec: `~/fusion/architecture/fusion-browser-prd-0826.md` (v2.0).
 
 ## 1. Overview
 
@@ -9,7 +9,9 @@ fusion-browser is a macOS native controlled browser engine providing Web visual 
 structured interaction for `fusion-agent-studio`, with CDP-automation reuse for
 `fusion-cowork`. Built on macOS native WebKit (WKWebView), dual protocol stack
 (UDS length-prefixed JSON main path + CDP-over-WS compatibility layer), with six
-built-in infrastructure modules.
+built-in infrastructure modules plus a flag-gated **Rust core compile module**
+(PRD §4.3 module 5) that re-derives the AXTree markdown/nodes/audit over a C-ABI
+FFI; default off, the Swift reducer stays the live path.
 
 **Two layers:**
 - **UDS server** — POSIX socket + per-client `DispatchSourceRead`, token auth,
@@ -77,7 +79,11 @@ FBUDSServer
 
 Each action ends with an AXTree re-extract (`FBAXTreeExtractor.extract`) so the
 state response carries a fresh `ax_tree_markdown` + `interactive_nodes` for the
-caller's next-step decision.
+caller's next-step decision. Inside `extract`, after `mapping.install` (always
+Swift — Rust does not own the JS WeakRef mapping), if `useRustCore` is set the
+markdown+nodes+audit are re-derived by the Rust core over FFI
+(`FBCoreBridge.compileJSON`); on any FFI/decode failure it degrades visibly and
+falls back to the Swift reducer. See §8.
 
 ## 4. Six Infra Modules
 
@@ -155,3 +161,72 @@ is the fusion-mlx registered ID using `--` separators, not HF `/`.
 - **Client connection retention** — store the `FBClientConnection` object itself
   in `[ObjectIdentifier: FBClientConnection]`, NOT just an `ObjectIdentifier` in
   a `Set` (a Set does not retain; the `DispatchSourceRead` handler never fires).
+
+## 8. Rust Core Engine (FFI, PRD §4.3 module 5)
+
+A flag-gated parallel compile path that re-derives the AXTree markdown + wire
+nodes + audit from the walker JSON over a C-ABI FFI. **Default OFF**
+(`useRustCore`); the Swift `FBAXTreeReducer` stays the live path. The staticlib
+is built + linked on every `swift build` (early Rust-drift detection), but only
+*called* when the flag is on. The Rust Worker Pool (PRD §4.2) is LANDED:
+`FBCoreWorkerPool` (N=cores-2, floor 2) bounds parallel Rust compiles so a full
+FR-08 load (up to 16 sessions) cannot over-subscribe the CPU via the unbounded
+`DispatchQueue.global()` the ActionDriver watchdog uses. `extract()` routes the
+Rust compile through `FBCoreWorkerPool.shared.compile`; on pool fail/shutdown it
+falls back to inline `FBCoreBridge.compileJSON` (pool = perf guard, never
+correctness). FR-12 metrics: `rustpool.enqueued`/`active`/`completed`/`fallback`
++ `rustpool.compile` latency.
+
+**FFI contract (authoritative, `rust/fb-core/src/lib.rs`):**
+- `fb_core_compile(in, in_len, &out, &out_len) -> i32` — decode walker JSON,
+  emit one combined JSON `{markdown, nodes:[...], audit:{...}}`; `FB_OK` /
+  `FB_ERR_DECODE` / `FB_ERR_PANIC`.
+- `fb_core_free(ptr, len)` — release the Rust-allocated output buffer (must be
+  called exactly once per `compile` success).
+- `fb_core_estimate_tokens(md, md_len) -> u32` — local token heuristic
+  (observability/benchmark consumer, not on the live path).
+- `fb_core_version() -> i32` — ABI version (startup log sanity).
+
+**Ownership = Rust-allocates / Rust-frees** (`Box::into_raw`/`from_raw` via
+`into_boxed_slice`). Symmetric alloc/free avoids crossing the allocator
+boundary. Every export is wrapped in `catch_unwind` → `FB_ERR_PANIC` so a Rust
+panic never crashes the Swift host (`panic = "unwind"` is mandatory — do NOT set
+`panic = "abort"`).
+
+**Swift bridge (`FBCoreBridge.swift`):** `compile` copies the Rust buffer into a
+Swift-owned `Data` and calls `fb_core_free` immediately (NEVER
+`Data(bytesNoCopy:)` — that defers free past lifetime and races allocators),
+then decodes `{markdown, nodes, audit}` into Swift types. `compileJSON` returns
+nil on any failure → `extract()` logs + falls back to the Swift reducer.
+
+**SPM wiring:** `BuildToolPlugin` `FBCoreRustBuilder` runs
+`cargo build --release`, stages `libfb_core.a` flat at `rust/fb-core/dist/`; the
+cTarget `FBCoreRust` (committed `fb_core.h` + `module.modulemap`) provides
+`import FBCoreRust`; both the executable and the test target link `-lfb_core`.
+`--disable-sandbox` is REQUIRED for build/test — the plugin writes the package
+tree, which the sandbox denies.
+
+**Parity gate (zero regression):** `rust/fb-core/tests/parity.json` (9 cases)
+is shared by `cargo test` (Rust side) and
+`Tests/FusionBrowserTests/RustCoreParityTests.swift` (5 tests, call the bridge
+directly, bypassing the flag, skip if the staticlib is absent). The Rust
+markdown must be byte-exact vs the Swift reducer (curly quotes U+201C/U+201D
+around name, `[@eN]` prefix, sorted `hiddenFlags` keys + optional
+`render:hidden`). Live smoke `scripts/parity_smoke.py` drives the release
+binary under two configs (useRustCore false vs true) on the same page and
+asserts `ax_tree_markdown` byte-identical.
+
+**Worker pool (`FBCoreWorkerPool.swift`, PRD §4.2):** the Rust `fb_core_compile`
+is pure stateless FFI (no statics, no locks, fresh alloc per call), so it is
+already safe under concurrent calls — the pool adds **bounded concurrency**, not
+parallelism the FFI lacked. Each `extract()` runs on an ActionDriver watchdog
+block dispatched to `DispatchQueue.global()` (unbounded), so under a full FR-08
+load (up to 16 sessions) up to 16 Rust compiles could contend for CPU. The pool
+caps parallel compiles at N=cores-2 (floor 2) via a `DispatchSemaphore`: a caller
+submits to a concurrent queue, a worker `wait()`s the semaphore, runs the
+compile inline on its thread, `signal()`s, and wakes the caller's per-task done
+semaphore. Strict FIFO is NOT preserved (GCD picks the next queued block), but
+each caller waits only on its own result, so order does not affect correctness.
+On enqueue/shutdown failure the caller falls back to a synchronous inline
+compile (the pre-pool path) — the pool is a performance guard, never a
+correctness dependency. `shutdownPool()`/`resetForTest()` support test isolation.

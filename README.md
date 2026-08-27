@@ -19,7 +19,7 @@ anti-injection sanitizer / CDP compat layer / credential closure) + Phase 3 thre
 tasks (multi-node dynamic quota / CDP domain extension + events / visual-grounding
 fallback) + Phase 4 five tasks (non-persistence verification / RSS self-restart /
 perf benchmark suite / UMA coexistence baseline / 1000-action long-run no-leak)
-complete. Build green, 90 unit tests pass. CDP `:9222` end-to-end smoke pass;
+complete. Build green, 99 unit tests pass. CDP `:9222` end-to-end smoke pass;
 T3.4 visual grounding verified via real VLM smoke; Phase 4 all verified via the
 release binary + Python verify scripts.
 
@@ -56,21 +56,28 @@ release binary + Python verify scripts.
 **Post-Phase-4 fix landed**
 - Node-id format (commit `9b3405e`, 2026-08-27): wire/structured node ids are BARE `eN` (`interactive_nodes[].node_id`, `target_node_id`); the markdown reduction `ax_tree_markdown` shows `[@eN]` for LLM readability only. An LLM forwarding `@e1` verbatim hit a `__fbMap` miss → `node_stale`. `FBActionDriver.execute` now strips a leading `@` from `target_node_id` once before admit/resolve/JS, so both `e1` and `@e1` resolve. Callers SHOULD send bare `eN`. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4.
 
+**Rust core engine landed (PRD §4.3 module 5, T1.4 override)**
+- Flag-gated parallel Rust path replicating the AXTree compiler (JSON decode → markdown reduction → wire nodes → audit). Crate `rust/fb-core/` (`crate-type = ["staticlib","rlib"]`, serde + serde_json, `panic = "unwind"` for `catch_unwind`). C-ABI FFI = `fb_core_compile` + `fb_core_free` + `fb_core_estimate_tokens` + `fb_core_version`; ownership is Rust-allocates/Rust-frees (`Box::into_raw`/`from_raw`), every export wrapped in `catch_unwind` → `FB_ERR_PANIC` (never crashes the host)
+- SPM wiring: `BuildToolPlugin` `FBCoreRustBuilder` runs `cargo build --release` → stages `libfb_core.a` flat at `rust/fb-core/dist/`; cTarget `FBCoreRust` (committed `fb_core.h` + `module.modulemap`) provides `import FBCoreRust`; both the executable + test target link `-lfb_core`. Build always, link always, **call conditionally** — the staticlib compiles on every `swift build` (catches Rust drift early) but the Swift code only calls it when the flag is on
+- Dispatch seam: `FBAXTreeExtractor.extract(webview:)` — after `mapping.install` (stays Swift either way), if `useRustCore` the markdown+nodes+audit come from `FBCoreBridge.compileJSON`; on nil (panic/decode fail) it degrades visibly + falls back to the Swift reducer. Default OFF → Swift path stays live
+- Parity gate (zero regression): `rust/fb-core/tests/parity.json` (9 cases) shared by `cargo test` + `Tests/FusionBrowserTests/RustCoreParityTests.swift` (5 tests, calls the bridge directly, bypassing the flag, skips if staticlib absent). `swift test` = 99 green. Live smoke `scripts/parity_smoke.py` drives the release binary under two configs (useRustCore false vs true) on the same page → `ax_tree_markdown` byte-identical (verified len=595, 5 nodes incl. masked password + purged hidden link)
+- Config key `useRustCore` (default `false`). Rust Worker Pool (PRD §4.2) LANDED — `FBCoreWorkerPool` (N=cores-2, floor 2) bounds parallel Rust compiles so a full FR-08 load (up to 16 sessions) cannot over-subscribe the CPU via the unbounded `DispatchQueue.global()` the ActionDriver watchdog uses. FIFO submit + `DispatchSemaphore` cap + per-task done semaphore; on enqueue/shutdown failure callers fall back to inline `FBCoreBridge.compileJSON` (pool is a perf guard, never correctness). FR-12 metrics: `rustpool.enqueued`/`active`/`completed`/`fallback` + `rustpool.compile` latency. `extract()` routes the Rust compile through `FBCoreWorkerPool.shared.compile`
+
 **Not done (per roadmap)**
-- Rust core engine (T1.4 assessment: pure Swift may suffice; decide in Phase 3 based on post-render visibility-analysis CPU load)
 - T3.1 agent-studio full integration: cross-project, this side ships the contract doc + issue only, code lands in fusion-agent-studio (now landed upstream via PR #235; my tracking issue #237 closed as duplicate; #241 open for test-fidelity)
 
 ## Build / Test
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
-swift build                # debug
+swift build                # debug (also runs cargo build --release via the FBCoreRustBuilder plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test                 # 90 tests
-swift test --filter CDPServerTests   # single test class
+swift test --disable-sandbox   # 99 tests (--disable-sandbox REQUIRED: plugin runs cargo, writes the package tree)
+swift test --disable-sandbox --filter CDPServerTests   # single test class
+cargo test --manifest-path rust/fb-core/Cargo.toml     # Rust-side parity fixtures (separate stack, PRD L115)
 ```
 
-Requires: macOS 14+, Xcode CLI Tools (verified Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64).
+Requires: macOS 14+, Xcode CLI Tools (verified Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64), Rust toolchain (`cargo`/`rustc`, arm64-apple-darwin) for the `rust/fb-core` staticlib.
 
 > Note: WKWebView completion handlers depend on the main run loop; `swift test` has no main loop → `evaluateJSSync`/`screenshotSync` semaphores deadlock. So live WKWebView behavior (real AX walker, screenshot, real navigation) is NOT verified inside `swift test`; covered by deterministic unit tests (rule catalog/reducer/translator/codec) + the built binary + Python smoke client. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §4.
 
@@ -90,7 +97,7 @@ JSON
 
 `logLevel`: debug/info/warn/error. Logs go to both `os_log` (Console.app, search `com.fusion.browser`) and stderr.
 
-Config keys: `socketPath`, `cdpEnabled`, `cdpPort`, `authToken`, `logLevel`, `allowedOrigins` (EVALUATE origin whitelist, empty=no limit), `visualLocator` (T3.4 visual-grounding fallback, default off; enabling needs a VLM loaded in fusion-mlx first; sub-keys `endpoint`/`model`/`timeoutMs`/`enabled`), `memoryWatchdog` (P4-2 RSS self-restart, default off; sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`, action=`close_sessions`|`exit`), `guards` (FR-13 scheduling guards, sub-keys `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`).
+Config keys: `socketPath`, `cdpEnabled`, `cdpPort`, `authToken`, `logLevel`, `allowedOrigins` (EVALUATE origin whitelist, empty=no limit), `useRustCore` (PRD §4.3 module 5, default `false`; route the AXTree compile markdown+nodes+audit through the Rust core staticlib; on any FFI/decode failure the Rust path degrades visibly and falls back to the Swift reducer), `visualLocator` (T3.4 visual-grounding fallback, default off; enabling needs a VLM loaded in fusion-mlx first; sub-keys `endpoint`/`model`/`timeoutMs`/`enabled`), `memoryWatchdog` (P4-2 RSS self-restart, default off; sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`, action=`close_sessions`|`exit`), `guards` (FR-13 scheduling guards, sub-keys `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`).
 
 P4-2 RSS self-restart enable example:
 ```json
@@ -105,6 +112,7 @@ P4-2 RSS self-restart enable example:
 | `scripts/perf_bench.py` | P4-3 perf benchmark (scroll/screenshot/click latency + AXTree compression ratio) | `scripts/perf-report.json` |
 | `scripts/uma_coexist.py` | P4-4 UMA coexistence (10 sessions×100 actions + mlx inference concurrent) | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action long-run no-leak (RSS quartile comparison) | `scripts/longrun-report.json` |
+| `scripts/parity_smoke.py` | Rust-core live parity (useRustCore false vs true, same page → byte-identical `ax_tree_markdown`) | terminal PASS/FAIL |
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 
@@ -163,10 +171,16 @@ NOT real Chrome — a shim translating cowork `cdp_client.py`'s real CDP transpo
 | `UDSServer.swift` | FR-09/10 POSIX socket UDS server + per-client read loop + auth routing |
 | `CDPServer.swift` | T2.3/T3.3 CDP-WS shim: POSIX TCP + HTTP discovery + WS upgrade + frame codec + `FBCDPTranslator` (CDP method→ActionDriver, extended Network/Console/Emulation/Page.lifecycleEvent/DOM) + `FBCDPEventEmitter` (events decoupled, deterministic unit-testable) |
 | `VisualLocator.swift` | T3.4 visual-grounding fallback: screenshot→fusion-mlx VLM `/v1/chat/completions` predicts `{x,y}` + OOB guards; pluggable `FBHTTPClient` |
+| `FBCoreBridge.swift` | PRD §4.3 module 5 Rust-core FFI bridge: `compile`/`compileJSON` (markdown+nodes+audit) + `version` + `estimateTokens`; Rust-alloc/Rust-free ownership, copies Rust buffer to Swift `Data` before `fb_core_free` (never `bytesNoCopy`); nil on panic/decode fail → caller falls back to Swift |
+| `FBCoreWorkerPool.swift` | PRD §4.2 Rust Worker Pool: bounds parallel Rust compiles (N=cores-2, floor 2) via `DispatchSemaphore` over a concurrent queue; on enqueue/shutdown failure falls back to inline `FBCoreBridge.compileJSON` (perf guard, never correctness); FR-12 metrics `rustpool.enqueued`/`active`/`completed`/`fallback` + `rustpool.compile` latency |
+| `Sources/FBCoreRust/` | cTarget: committed `include/fb_core.h` (C-ABI contract) + `module.modulemap` + `fb_core_stubs.c` anchor; `import FBCoreRust` gated by `#if canImport(FBCoreRust)` |
+| `Plugins/FBCoreRustBuilder/` | `BuildToolPlugin`: runs `cargo build --release`, stages `libfb_core.a` flat to `rust/fb-core/dist/`; inputs = `Cargo.toml` + `src/**` so SPM only re-runs cargo on Rust-source change |
+| `rust/fb-core/` | Rust crate `fb_core` (`staticlib`+`rlib`, serde + serde_json, `panic = "unwind"`): `compile.rs` (decode→markdown+nodes+audit) + `markdown.rs` (byte-exact reducer) + `token.rs` (estimate_tokens) + `tests/parity.json` (9-case shared fixture) |
 
 ## Roadmap (see PRD §4)
 
 - Phase 1 (base): engine base + six infra modules + action passthrough + tiered watchdog ✓
 - Phase 2: AXTree extractor + anti-injection sanitizer + CDP compat layer (4 domains) + credential closure ✓
 - Phase 3: multi-node adaptation (T3.2) + CDP domain extension + events (T3.3) + visual-grounding fallback (T3.4) ✓; agent-studio full integration (T3.1) cross-project, landed upstream
-- Phase 4 (this landing, production-hardening): non-persistence verification (P4-1, FR-04) + RSS self-restart (P4-2) + perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action long-run no-leak (P4-5) ✓
+- Phase 4 (production-hardening): non-persistence verification (P4-1, FR-04) + RSS self-restart (P4-2) + perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action long-run no-leak (P4-5) ✓
+- Rust core engine (PRD §4.3 module 5, T1.4 override): flag-gated `fb_core` staticlib + C-ABI FFI + `FBCoreBridge` + `FBCoreWorkerPool` (PRD §4.2, bounded parallel compiles), parity-gated (cargo test + `RustCoreParityTests` + live smoke), default OFF ✓

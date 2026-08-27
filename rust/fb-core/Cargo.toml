@@ -1,0 +1,15 @@
+[package]
+name = "fb_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fb_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "unwind"

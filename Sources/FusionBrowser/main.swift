@@ -41,10 +41,16 @@ func runEngine() {
     log.info("Main", "fusion-browser engine starting")
     log.info("Main", "quota: sessions=\(cfg.quota.maxSessions) mem/sess=\(cfg.quota.maxMemoryPerSessionMB)MB total=\(cfg.quota.maxTotalMemoryMB)MB")
     log.info("Main", "socket=\(cfg.socketPath) cdp=\(cfg.cdpEnabled ? "on:\(cfg.cdpPort)" : "off")")
+    if FBCoreBridge.isAvailable {
+        let v = FBCoreBridge.version()
+        log.info("Main", "rust core available version=0x\(String(v, radix: 16)) useRustCore=\(cfg.useRustCore)")
+    } else {
+        log.info("Main", "rust core not available (Swift path)")
+    }
 
     let auth = FBAuth(token: cfg.authToken)
     let creds = FBCredentialManager()
-    let extractor = FBAXTreeExtractor()
+    let extractor = FBAXTreeExtractor(useRustCore: cfg.useRustCore)
     let sanitizer = FBSanitizer()
     let watchdog = cfg.watchdog.policy()
     let manager = FBSessionManager(quota: cfg.quota, guards: cfg.guards, watchdog: watchdog,

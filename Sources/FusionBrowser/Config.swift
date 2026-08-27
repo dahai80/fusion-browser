@@ -110,6 +110,9 @@ public struct FBEngineConfig: Codable {
     public var visualLocator: FBVisualLocatorConfig
     // P4-2: process-level RSS watchdog (OOM self-heal). Default off.
     public var memoryWatchdog: FBMemoryWatchdogConfig
+    // PRD §4.3 module 5: route AXTree compile through the Rust core engine.
+    // Default off (Swift path stays live); flag flip is a config reload, not a rebuild.
+    public var useRustCore: Bool
 
     public init(socketPath: String = "/tmp/fusion-browser.sock",
                 cdpPort: Int = 9222, cdpEnabled: Bool = false,
@@ -119,7 +122,8 @@ public struct FBEngineConfig: Codable {
                 watchdog: FBWatchdogPolicyEncoder = FBWatchdogPolicyEncoder(),
                 logLevel: String = "info",
                 visualLocator: FBVisualLocatorConfig = FBVisualLocatorConfig(),
-                memoryWatchdog: FBMemoryWatchdogConfig = FBMemoryWatchdogConfig()) {
+                memoryWatchdog: FBMemoryWatchdogConfig = FBMemoryWatchdogConfig(),
+                useRustCore: Bool = false) {
         self.socketPath = socketPath
         self.cdpPort = cdpPort
         self.cdpEnabled = cdpEnabled
@@ -131,12 +135,13 @@ public struct FBEngineConfig: Codable {
         self.logLevel = logLevel
         self.visualLocator = visualLocator
         self.memoryWatchdog = memoryWatchdog
+        self.useRustCore = useRustCore
     }
 
     public static let `default` = FBEngineConfig()
 
     enum CodingKeys: String, CodingKey {
-        case socketPath, cdpPort, cdpEnabled, authToken, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog
+        case socketPath, cdpPort, cdpEnabled, authToken, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog, useRustCore
     }
 
     public init(from decoder: Decoder) throws {
@@ -153,6 +158,7 @@ public struct FBEngineConfig: Codable {
         logLevel = try c.decodeIfPresent(String.self, forKey: .logLevel) ?? d.logLevel
         visualLocator = try c.decodeIfPresent(FBVisualLocatorConfig.self, forKey: .visualLocator) ?? d.visualLocator
         memoryWatchdog = try c.decodeIfPresent(FBMemoryWatchdogConfig.self, forKey: .memoryWatchdog) ?? d.memoryWatchdog
+        useRustCore = try c.decodeIfPresent(Bool.self, forKey: .useRustCore) ?? d.useRustCore
     }
 }
 
