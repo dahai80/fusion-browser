@@ -67,13 +67,16 @@ fusion-agent-studio 通过 **browser_tool** 接入 fusion-browser，使 Agent �
 {"type": "execute",
  "payload": {"session_id": "<sid>",
              "action": "click",
-             "target_node_id": "@e3",
+             "target_node_id": "e3",
              "payload_text": null,
              "scroll_delta_y": null,
              "trace_id": "<tid>"}}
 ```
 - `action`：`click` | `type_text` | `scroll` | `navigate` | `screenshot` | `evaluate` | `close`
-- `target_node_id`：`click`/`type_text` 必带，形如 `@e3`（AXTree 稳定映射 ID）
+- `target_node_id`：`click`/`type_text` 必带，形如 `e3`（AXTree 稳定映射 ID，**裸 ID，不带 `@`**）。
+  **格式约定**：`ax_tree_markdown` 为便于 LLM 阅读，显示为 `[@eN]`（带 `@`）；而结构化字段
+  `interactive_nodes[].node_id` 与 `target_node_id` 走线均为**裸 `eN`**（不带 `@`）。
+  引擎侧 `FBActionDriver` 会兜底剥离前导 `@`（兼容 LLM 误传 markdown 形式），但调用方应发裸 `eN`。
 - `payload_text`：`type_text` 文本 / `navigate` URL / `evaluate` JS
 - `scroll_delta_y`：`scroll` 像素位移（默认 300）
 - `trace_id`：贯穿 agent-studio→browser→mlx（见 §7）
@@ -85,7 +88,7 @@ fusion-agent-studio 通过 **browser_tool** 接入 fusion-browser，使 Agent �
              "url": "...",
              "title": "...",
              "ax_tree_markdown": "...",
-             "interactive_nodes": [{"node_id": "@e3", "role": "button", "name": "Login",
+             "interactive_nodes": [{"node_id": "e3", "role": "button", "name": "Login",
                                     "is_disabled": false, "current_value": ""}],
              "screenshot_jpeg": null,
              "has_security_injection_blocked": false,
@@ -96,8 +99,8 @@ fusion-agent-studio 通过 **browser_tool** 接入 fusion-browser，使 Agent �
              "error": null,
              "trace_id": "<tid>"}}
 ```
-- `ax_tree_markdown`：降维 Markdown，交互节点一行一项，供 LLM ≤1500 token 决策
-- `interactive_nodes`：结构化节点列表（`@eN` + role + name + disabled + value）
+- `ax_tree_markdown`：降维 Markdown，交互节点一行一项，显示 `[@eN]`（带 `@`，LLM 决策用），供 LLM ≤1500 token 决策
+- `interactive_nodes`：结构化节点列表（裸 `eN` + role + name + disabled + value）；`node_id` 为裸 `eN`，回传 `target_node_id` 应直接用此值
 - `screenshot_jpeg`：`screenshot` 动作返回 base64？— **注意**：本字段为 bytes，JSON 编码下为 null，截图实际走独立 screenshot 动作返回值（实现侧以 base64 字符串承载，见 §10）
 - `error`：非空则本次失败，见 §6
 - `session_recovered`：本次是否经 watchdog 重建
@@ -138,7 +141,7 @@ class BrowserTool(BaseTool):
             "description": "Browser action to perform."
         },
         "url": {"type": "string", "description": "URL to navigate to (action=navigate)."},
-        "node_id": {"type": "string", "description": "Target @eN node id (action=click/type_text)."},
+        "target_node_id": {"type": "string", "description": "Target node id (action=click/type_text). Bare `eN` from interactive_nodes[].node_id; markdown shows [@eN] but wire is bare eN."},
         "text": {"type": "string", "description": "Text to type (action=type_text) or JS (action=evaluate)."},
         "scroll_delta_y": {"type": "integer", "description": "Scroll pixels (action=scroll)."},
         "session_id": {"type": "string", "description": "Browser session id (omitted on create_session)."},
@@ -181,7 +184,7 @@ agent-studio
   │ 1. browser(action=create_session, url=...)          → session_id
   │ 2. browser(action=navigate, url=...)                 → ax_tree_markdown + @eN 节点
   │ 3. LLM ≤1500 token 上下文决策下一步 (经 fusion-mlx)
-  │ 4. browser(action=click, node_id=@e3, trace_id=tid)  → 新 ax_tree_markdown
+  │ 4. browser(action=click, target_node_id=e3, trace_id=tid)  → 新 ax_tree_markdown
   │    ├─ error.code=node_stale → 重新 extract 取最新 @eN，重试点击（不静默失败）
   │    └─ error.retryable=true & session_recovered=true → 引擎已重建，重发同一动作
   │ 5. 循环 3-4 直到任务完成
@@ -251,7 +254,7 @@ PRD §4 Phase 3 T3.1 验收门：**agent-studio 端到端跑通 Web Workflow 场
 1. 启 fusion-browser（`~/.fusion-browser/config.json` 配 `authToken` + `allowedOrigins`）
 2. Agent 用 `browser(create_session, mode=headless, url=https://example.com)`
 3. `extract` 拿 `ax_tree_markdown` + `@eN`，LLM 决策点击某链接
-4. `click(node_id=@eN)` → 验证返回新 `url` 已跳转
+4. `click(target_node_id=eN)` → 验证返回新 `url` 已跳转
 5. 触发一次 `node_stale`（导航后立即用旧 `@eN`）→ 验证 Agent 自动重抽重试，不静默失败
 6. `type_text` 填表单 + 提交 → 验证 `trace_id` 贯穿三方日志可查
 7. `close_session` → 验证资源释放

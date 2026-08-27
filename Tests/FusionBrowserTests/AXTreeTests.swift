@@ -88,4 +88,19 @@ final class StableMappingTests: XCTestCase {
         m.invalidate()
         XCTAssertEqual(m.count(), 0)
     }
+
+    // T2.1 node-id format contract: markdown advertises [@e1] but the stable mapping
+    // + JS __fbMap key the node BARE (e1). A caller passing the markdown form "@e1"
+    // MUST NOT resolve directly — that is the gap the ActionDriver leading-@ strip
+    // closes. Pin both facts so the normalization stays load-bearing.
+    func testNodeIdBareKeyMarkdownAtPrefixDoesNotResolve() {
+        let m = FBStableMapping()
+        m.install([
+            FBExtractedNode(nodeId: "e1", role: "button", name: "Login", isDisabled: false,
+                            currentValue: "", fingerprint: "button|Login", docPath: "p",
+                            hiddenFlags: [:], renderHidden: false),
+        ])
+        XCTAssertEqual(m.resolve("e1")?.name, "Login")
+        XCTAssertNil(m.resolve("@e1"))
+    }
 }

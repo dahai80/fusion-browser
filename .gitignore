@@ -5,3 +5,4 @@
 *.xcodeproj/
 DerivedData/
 .fusion-browser/
+scripts/*-report.json

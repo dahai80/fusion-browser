@@ -27,10 +27,24 @@ public final class FBActionDriver {
     }
 
     // Execute one action against a session. Returns state response (error set on failure).
-    public func execute(session: FBSession, req: BrowserActionRequest) -> BrowserStateResponse {
-        let traceId = req.traceId ?? FBTrace.newId()
+    public func execute(session: FBSession, req reqIn: BrowserActionRequest) -> BrowserStateResponse {
+        let traceId = reqIn.traceId ?? FBTrace.newId()
         let startTs = Date().timeIntervalSince1970
         let sid = session.id
+
+        // T2.1 node-id normalization: AXTree markdown advertises interactive nodes as
+        // [@eN] (with @ for LLM display), but the stable mapping + JS __fbMap key the
+        // node BARE (e1). Callers (agent-studio BrowserTool, LLM, CDP) may pass the
+        // markdown form "@e1". Strip the leading @ once here so resolve()/admit/JS all
+        // see the bare key; the two forms then resolve the same node. Visible log so a
+        // caller consistently sending @ is detectable (Rule 12), not silently coerced.
+        var req = reqIn
+        if let nid = req.targetNodeId, nid.hasPrefix("@") {
+            let bare = String(nid.dropFirst())
+            log.info("Action", "node_id normalize @ stripped: \(nid)->\(bare) sess=\(sid)",
+                     traceId: traceId, sessionId: sid)
+            req.targetNodeId = bare
+        }
 
         // FR-13 scheduling gate.
         switch session.scheduler.admit(action: req.action, target: req.targetNodeId, payload: req.payloadText) {
