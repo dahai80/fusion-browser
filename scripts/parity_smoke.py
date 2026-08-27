@@ -107,9 +107,10 @@ def run_smoke(use_rust, binary):
         if not ack or ack.get("type") != "auth_ack":
             raise RuntimeError(f"auth failed: {ack}")
         # create with initial_url: the page loads on the main thread (WKWebView.load
-        # is main-wrapped on the create path). navigate-via-execute is NOT main-wrapped
-        # (ActionDriver.dispatch runs on a global queue -> wv.load off-main traps),
-        # so we load here and trigger extract with a scroll action (JS-only, off-main safe).
+        # is main-wrapped on the create path). navigate-via-execute is ALSO main-wrapped
+        # now (WebView.navigate hops wv.load to main when off-main, fix for task #34),
+        # but this smoke loads via create + triggers extract with a scroll action
+        # (JS-only, off-main safe) to keep the parity comparison on a stable load.
         send(s, {"type": "create_session", "payload": {"mode": "headless", "initialUrl": PAGE}})
         cr = recv_one(s)
         print(f"[parity] create resp: {json.dumps(cr)[:300]}", file=sys.stderr)

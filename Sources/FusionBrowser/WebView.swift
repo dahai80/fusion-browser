@@ -111,9 +111,24 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     // FR-06 navigate. Watchdog handled by ActionDriver; here returns immediately.
+    // WKWebView.load MUST run on main (off-main -> SIGTRAP exit 133). Called from
+    // ActionDriver.dispatch inside the runWithWatchdog block on DispatchQueue.global(),
+    // so guard the main-thread hop. Sync-wait so the subsequent extract() re-queries
+    // the page that was actually loaded; never sync-wait ON main (deadlock).
     public func navigate(url: String, timeoutMs: Int) {
         guard let wv = webView, let u = URL(string: url) else { return }
-        wv.load(URLRequest(url: u))
+        if Thread.isMainThread {
+            wv.load(URLRequest(url: u))
+        } else {
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                wv.load(URLRequest(url: u))
+                sem.signal()
+            }
+            if sem.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
+                log.warn("WebView", "navigate main-hop timeout \(url) sess=\(sessionId)")
+            }
+        }
         log.info("WebView", "navigate \(url) sess=\(sessionId)")
     }
 
