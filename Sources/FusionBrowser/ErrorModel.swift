@@ -19,12 +19,21 @@ public struct FBError: Error, Codable, Equatable {
     public static let evaluateDenied = FBError(code: "evaluate_denied", message: "EVALUATE not permitted: capability or origin not allowed", retryable: false)
     public static let authDenied = FBError(code: "auth_denied", message: "authentication token invalid or missing", retryable: false)
     public static let sessionNotFound = FBError(code: "session_not_found", message: "session id unknown or already closed", retryable: false)
+    // E-22: session is mid-close (teardown in flight). A concurrent execute on a closing
+    // session must fail fast rather than touch a half-destroyed WKWebView (stopLoading/
+    // removeFromSuperview/destroy interleaved with evaluateJSSync -> JS completion never
+    // fires -> watchdog timeout or trap). Not retryable: the session is gone for good;
+    // the caller must create a new one.
+    public static let sessionClosing = FBError(code: "session_closing", message: "session is closing; teardown in flight", retryable: false)
     public static let invalidRequest = FBError(code: "invalid_request", message: "malformed request", retryable: false)
     public static let timeout = FBError(code: "timeout", message: "action exceeded watchdog timeout", retryable: true)
     public static let navigateFailed = FBError(code: "navigate_failed", message: "navigation failed", retryable: true)
     public static let ffiPanic = FBError(code: "ffi_panic", message: "core engine panic", retryable: false)
     public static let internalError = FBError(code: "internal_error", message: "unexpected internal error", retryable: false)
     public static let replayLimit = FBError(code: "replay_limit", message: "rebuild recursion depth cap reached (1)", retryable: false)
+    // H-8: per-client rate limit exceeded. Retryable — the caller should back off and retry
+    // (the bucket refills at ratePerSec, so a brief wait re-admits the request).
+    public static let rateLimited = FBError(code: "rate_limited", message: "per-client request rate exceeded; retry after backoff", retryable: true)
 }
 
 public enum FBResult<T> {

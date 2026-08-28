@@ -44,6 +44,19 @@ public final class FBScheduler {
         }
     }
 
+    // L-5: a visual-grounding click bypasses the __fbMap fingerprint path and clicks at
+    // bare coordinates, so the scheduler's lastActionKey (set by the preceding admit to
+    // "click:@eN:") no longer reflects what actually ran. A second visual fallback on the
+    // same target would trip repeat-break on that stale key. Call this after a visual
+    // click so the key advances and the repeat counter reflects the visual path. The
+    // visual click still counts against maxActions (already admitted).
+    public func noteVisualClick(target: String?) {
+        queue.sync {
+            lastActionKey = "click:visual:\(target ?? "")"
+            lastActionRepeat = 0
+        }
+    }
+
     // FR-13: max_actions + task_timeout + repeat detection.
     public func admit(action: ActionType, target: String?, payload: String?) -> FBSchedulingDecision {
         return queue.sync {
@@ -88,10 +101,14 @@ public final class FBScheduler {
     }
 
     // Idempotency: which actions may be replayed after watchdog crash recovery.
+    // L-1: .navigate is NOT idempotent — navigating to a POST/PUT URL or a page with an
+    // onLoad side effect re-fires that effect on replay (duplicate submit). Only scroll and
+    // screenshot are safe to replay (pure view ops). This keeps crash-recovery honest: a
+    // timed-out navigate fails directly rather than silently re-loading the URL.
     public static func isIdempotent(_ action: ActionType) -> Bool {
         switch action {
-        case .navigate, .scroll, .screenshot: return true
-        case .click, .typeText, .evaluate, .close: return false
+        case .scroll, .screenshot: return true
+        case .navigate, .click, .typeText, .evaluate, .close: return false
         }
     }
 }

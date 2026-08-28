@@ -72,8 +72,12 @@ public final class FBVisualLocator {
         self.client = client
     }
 
+    // L-5: expose the enabled flag so callers gate on it (visualLocator != nil is not enough —
+    // a config object can exist with enabled=false).
+    public var isEnabled: Bool { return config.enabled }
+
     // Predict the click centroid for `description` within a screenshot of `viewportSize`.
-    // Returns nil on disabled / HTTP failure / unparseable / out-of-bounds coords.
+    // Returns nil on disabled / HTTP failure / unparseable / non-finite / out-of-bounds coords.
     // screenshot: PNG bytes from FBWebView.screenshotSync. viewportSize for OOB validation.
     public func predict(screenshot: Data, description: String, viewportSize: (w: Int, h: Int)) -> FBPredictedCoord? {
         guard config.enabled else { return nil }
@@ -89,6 +93,13 @@ public final class FBVisualLocator {
         }
         guard let coord = parseCoord(from: text) else {
             log.warn("Visual", "predict unparseable coords text=\(text.prefix(120))")
+            return nil
+        }
+        // L-5: reject NaN/Infinity BEFORE the OOB comparisons (NaN fails every ordering
+        // check, so it would slip the < 0 / > viewport guards and interpolate into JS as
+        // elementFromPoint(NaN,NaN)).
+        if !coord.x.isFinite || !coord.y.isFinite {
+            log.warn("Visual", "predict non-finite x=\(coord.x) y=\(coord.y)")
             return nil
         }
         // Out-of-bounds guard: VLM may hallucinate past the viewport.
@@ -133,16 +144,37 @@ public final class FBVisualLocator {
         return message["content"] as? String
     }
 
-    // Parse {"x":..,"y":..} out of the model text, tolerating surrounding prose/code fences.
+    // Parse {"x":..,"y":..} out of the model text. L-18: the response must be (after
+    // stripping optional ```json fences and surrounding whitespace) a SINGLE JSON object
+    // — NOT the first {...} substring. Prose-wrapped JSON like
+    // "can't help, example: {\"x\":0,\"y\":0}" is rejected, since it yields garbage
+    // in-bounds coords (e.g. a hallucinated top-left) that pass the OOB guard.
     func parseCoord(from text: String) -> FBPredictedCoord? {
-        // Find the first {...} block and parse it.
-        guard let start = text.firstIndex(of: "{"),
-              let end = text[start...].firstIndex(of: "}") else { return nil }
-        let jsonStr = String(text[start...end])
-        guard let data = jsonStr.data(using: .utf8),
+        var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip one optional code fence: ```json ... ``` or ``` ... ```.
+        if s.hasPrefix("```") {
+            // Drop the opening fence line.
+            if let nl = s.firstIndex(of: "\n") { s = String(s[s.index(after: nl)...]) }
+            else { return nil }
+            s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if s.hasSuffix("```") { s = String(s.dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        // Whole-response must BE a JSON object — no trailing prose allowed.
+        guard s.hasPrefix("{"), s.hasSuffix("}") else { return nil }
+        guard let data = s.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        let x = (obj["x"] as? Double) ?? Double(obj["x"] as? Int ?? 0)
-        let y = (obj["y"] as? Double) ?? Double(obj["y"] as? Int ?? 0)
+        // x and y must be present and numeric. Reject if absent (Double nil-coalesce to 0
+        // would fabricate a top-left coord from a {"y":..}-only hallucination).
+        let xv = obj["x"]
+        let yv = obj["y"]
+        guard let x = numberValue(xv), let y = numberValue(yv) else { return nil }
         return FBPredictedCoord(x: x, y: y)
+    }
+
+    // Coerce a JSON number (Double or Int) to Double; reject strings/nil/other types.
+    private func numberValue(_ v: Any?) -> Double? {
+        if let d = v as? Double { return d }
+        if let i = v as? Int { return Double(i) }
+        return nil
     }
 }

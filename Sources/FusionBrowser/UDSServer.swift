@@ -9,6 +9,7 @@ public final class FBUDSServer {
     private let manager: FBSessionManager
     private let driver: FBActionDriver
     private let auth: FBAuth
+    private let rateLimitConfig: FBRateLimitConfig
     private var listenFd: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private let log = FBLogger.shared
@@ -17,17 +18,23 @@ public final class FBUDSServer {
     private var clients: [ObjectIdentifier: FBClientConnection] = [:]
     private let clientsLock = NSLock()
 
-    public init(socketPath: String, manager: FBSessionManager, driver: FBActionDriver, auth: FBAuth) {
+    public init(socketPath: String, manager: FBSessionManager, driver: FBActionDriver,
+                auth: FBAuth, rateLimit: FBRateLimitConfig = FBRateLimitConfig()) {
         self.socketPath = socketPath
         self.manager = manager
         self.driver = driver
         self.auth = auth
+        self.rateLimitConfig = rateLimit
     }
 
     public func start() throws {
         try? FileManager.default.removeItem(atPath: socketPath)
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw FBError.internalError }
+        // F-9: socket file must be 0o600 at CREATION, not chmod'd after bind (TOCTOU).
+        // Set umask 0o077 before bind so the inode is born with 0o600; restore after.
+        // Belt-and-suspenders: fchmod(fd) post-bind closes by fd (no path race).
+        let savedUmask = umask(0o077)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString
@@ -44,9 +51,10 @@ public final class FBUDSServer {
                 Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        _ = umask(savedUmask)
         guard bindRes == 0 else { Darwin.close(fd); log.error("UDSServer", "bind failed errno=\(errno)"); throw FBError.internalError }
-        guard Darwin.listen(fd, 16) == 0 else { Darwin.close(fd); log.error("UDSServer", "listen failed"); throw FBError.internalError }
-        chmod(socketPath, 0o600)
+        _ = fchmod(fd, 0o600)
+        guard Darwin.listen(fd, 128) == 0 else { Darwin.close(fd); log.error("UDSServer", "listen failed"); throw FBError.internalError }
         self.listenFd = fd
 
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .global())
@@ -69,7 +77,8 @@ public final class FBUDSServer {
         let flags = fcntl(clientFd, F_GETFL, 0)
         _ = fcntl(clientFd, F_SETFL, flags | O_NONBLOCK)
         log.info("UDSServer", "connection accepted fd=\(clientFd)")
-        let client = FBClientConnection(fd: clientFd, manager: manager, driver: driver, auth: auth) { [weak self] in
+        let client = FBClientConnection(fd: clientFd, manager: manager, driver: driver, auth: auth,
+                                         rateLimitConfig: rateLimitConfig) { [weak self] in
             // onDone: remove from retain set
             self?.releaseClient(ObjectIdentifier($0))
         }
@@ -99,20 +108,32 @@ final class FBClientConnection {
     private let driver: FBActionDriver
     private let auth: FBAuth
     private let reader = FBFrameReader()
-    private let queue = DispatchQueue(label: "fusion-browser.client")
+    // H-8: .userInitiated QoS so a client's execute requests are not deprioritized
+    // behind background work on the shared dispatch pool (fair scheduling to the
+    // main-thread webview path). The serial label still isolates one client's frames.
+    private let queue = DispatchQueue(label: "fusion-browser.client", qos: .userInitiated)
     private var readSource: DispatchSourceRead?
     private var authed = false
     private var caps: FBCapabilities = []
     private let log = FBLogger.shared
     private let onDone: (FBClientConnection) -> Void
+    // H-8: per-client token-bucket rate limiter. nil when disabled (bypass).
+    private let rateLimiter: FBRateLimiter?
 
     init(fd: Int32, manager: FBSessionManager, driver: FBActionDriver, auth: FBAuth,
+         rateLimitConfig: FBRateLimitConfig,
          onDone: @escaping (FBClientConnection) -> Void) {
         self.fd = fd
         self.manager = manager
         self.driver = driver
         self.auth = auth
         self.onDone = onDone
+        if rateLimitConfig.enabled {
+            self.rateLimiter = FBRateLimiter(ratePerSec: rateLimitConfig.ratePerSec,
+                                             burst: rateLimitConfig.burst)
+        } else {
+            self.rateLimiter = nil
+        }
     }
 
     func start() {
@@ -188,10 +209,21 @@ final class FBClientConnection {
             }
         case .execute(let r):
             guard caps.contains(cap(for: r.action)) else { send(error: .authDenied); return }
+            // H-8: per-client rate gate. A rejected request does NOT consume a token,
+            // so a retry-poll loop does not drain the bucket for the next legit caller.
+            if let limiter = rateLimiter, !limiter.admit() {
+                log.warn("Client", "rate_limited fd=\(fd) action=\(r.action.rawValue)")
+                send(error: .rateLimited)
+                return
+            }
             guard let session = manager.get(r.sessionId) else { send(error: .sessionNotFound); return }
-            let state = driver.execute(session: session, req: r)
+            // H-5: pass the token's actual caps to the driver (authoritative per-action gate).
+            let state = driver.execute(session: session, req: r, caps: caps)
             send(resp: .state(state))
         case .close(let sid):
+            // F-8: top-level .close must respect .close capability (cross-session DoS
+            // if a navigate-only client can tear down any session by id).
+            guard caps.contains(.close) else { send(error: .authDenied); return }
             let err = manager.close(sessionId: sid)
             if let e = err { send(error: e) }
             else { send(resp: .closed(sessionId: sid)) }
@@ -216,6 +248,11 @@ final class FBClientConnection {
         if let data = try? FBFrame.encode(ack) { writeAll(data) }
     }
 
+    // P-2: bounded backpressure. fd is non-blocking; on EAGAIN we poll(POLLOUT) with a
+    // per-call deadline instead of busy-spinning (usleep spin pins the queue thread
+    // unbounded on a slow client). A client that never drains is dropped after the
+    // deadline rather than starving the shared dispatch pool.
+    private static let writeDeadlineMs: Int32 = 5000
     private func writeAll(_ data: Data) {
         var sent = 0
         while sent < data.count {
@@ -224,12 +261,30 @@ final class FBClientConnection {
                 return Darwin.write(fd, p, data.count - sent)
             }
             if n < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK { usleep(1000); continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    if !awaitWritable() {
+                        log.warn("Client", "write timeout fd=\(fd), dropping slow client")
+                        readSource?.cancel()
+                        return
+                    }
+                    continue
+                }
+                log.warn("Client", "write err errno=\(errno) fd=\(fd)")
                 readSource?.cancel(); return
             }
             if n == 0 { readSource?.cancel(); return }
             sent += n
         }
+    }
+
+    // Block up to writeDeadlineMs for the fd to become writable. Returns false on
+    // timeout (caller should drop the client) or poll error.
+    private func awaitWritable() -> Bool {
+        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        let r = withUnsafeMutablePointer(to: &pfd) { ptr in
+            Darwin.poll(ptr, nfds_t(1), Self.writeDeadlineMs)
+        }
+        return r > 0 && (pfd.revents & Int16(POLLOUT)) != 0
     }
 
     private func cap(for action: ActionType) -> FBCapabilities {

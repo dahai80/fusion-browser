@@ -14,6 +14,35 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     private let log = FBLogger.shared
     // Shared pool to cap WebContent process count (FR-08).
     static let sharedPool = WKProcessPool()
+    // L-7: JS eval pipeline wedge flag. WKWebView serializes JS eval on the main thread;
+    // an adversarial/buggy page script (while(true){}) wedges the queue so every subsequent
+    // evaluateJSSync times out with no way to cancel the in-flight eval. Set on timeout,
+    // surfaced loudly, and a self-heal reload is attempted. There is no public API to cancel
+    // a running evaluateJavaScript, so the only recovery is to reload the page (which drops
+    // the wedged script context) — best-effort, never blocks the caller.
+    private var jsWedged: Bool = false
+    // R-1: pending navigation completion slot. Off-main navigate arms this; the
+    // WKNavigationDelegate didFinish/didFail signals it, identity-matched to the
+    // WKNavigation returned by load(). Lets navigate wait for the page to actually
+    // load before the subsequent extract queries it (the old code only waited for
+    // the main-hop = load issued, so extract ran against a still-loading page ->
+    // stale/partial AXTree). One in-flight nav per session (navigate is synchronous
+    // and serialized by the action watchdog).
+    private let navLock = NSLock()
+    private var pendingNav: (sem: DispatchSemaphore, nav: WKNavigation?)?
+
+    // E-11/Finding 26: capture the real main-document HTTP response so the CDP
+    // Network.responseReceived event can report the actual status (was hardcoded 200).
+    // Set by decidePolicyFor (fires before didFinish); read by the CDP emitter after nav.
+    // NSLock-guarded: decidePolicyFor fires on main, the CDP read fires off main.
+    private let respLock = NSLock()
+    private var _lastResponse: (status: Int, mime: String, headers: [String: String])?
+    var lastResponse: (status: Int, mime: String, headers: [String: String])? {
+        respLock.lock(); defer { respLock.unlock() }; return _lastResponse
+    }
+    func setLastResponse(_ r: (status: Int, mime: String, headers: [String: String])?) {
+        respLock.lock(); _lastResponse = r; respLock.unlock()
+    }
 
     public init(mode: WebMode, sessionId: String) {
         self.mode = mode
@@ -37,11 +66,30 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         self.webView = wv
 
         if mode == .headless {
-            // Offscreen, no visible window. Attach to a zero-size host to keep it alive.
-            let host = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 1280, height: 800),
-                                styleMask: [], backing: .buffered, defer: false)
+            // Headless lives in an on-screen transparent window so the WKWebView page
+            // visibilityState stays "visible". An offscreen (-2000,-2000) or un-ordered
+            // window makes the page hidden, and WebKit's ProcessThrottler then sends
+            // prepareToSuspend to the WebContent process; a WKSnapshot (screenshotSync)
+            // forces a render that races the suspend and traps (sendPrepareToSuspendIPC ->
+            // ~ProcessThrottlerActivity -> RefCounted::deref -> SIGTRAP exit 133). A
+            // .userInitiated process activity token does NOT prevent this — ProcessThrottler
+            // suspension is driven by page visibilityState, NOT by macOS App Nap. The window
+            // must be on a real screen rect to keep visibilityState=visible. alphaValue=0 +
+            // opaque=false + borderless make it invisible to the user; .accessory policy keeps
+            // the app out of the Dock. .popUpMenu level + ignoresMouseEvents keep it from
+            // stealing focus/input. Tested: on-screen + real snapshot = no crash; the RSS cost
+            // of repeated snapshots is a separate cache-pressure concern (handled by the
+            // reaper + memoryWatchdog), not a leak (plateaus, does not grow unbounded).
+            let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+                                styleMask: [.borderless], backing: .buffered, defer: false)
             host.contentView = wv
             host.isReleasedWhenClosed = false
+            host.isOpaque = false
+            host.backgroundColor = .clear
+            host.alphaValue = 0
+            host.ignoresMouseEvents = true
+            host.level = .popUpMenu
+            host.orderFrontRegardless()
             self.hostWindow = host
         } else {
             let host = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1280, height: 800),
@@ -83,9 +131,13 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     // FR-05: inject full cookie attributes into this session's in-memory dataStore.
     // Stores name/value/domain/path/expires/secure/httponly/samesite (T2.4 full-attr requirement).
-    public func injectCookies(_ attrs: [String: String], domain: String) {
+    // F-11: returns Bool so the caller reports injection truthfully (was true unconditionally).
+    public func injectCookies(_ attrs: [String: String], domain: String) -> Bool {
         guard let store = webView?.configuration.websiteDataStore.httpCookieStore,
-              let name = attrs["name"], let value = attrs["value"] else { return }
+              let name = attrs["name"], let value = attrs["value"] else {
+            log.warn("WebView", "cookie inject skip: missing store/name/value domain=\(domain) sess=\(sessionId)")
+            return false
+        }
         var props: [HTTPCookiePropertyKey: Any] = [
             .domain: attrs["domain"] ?? domain,
             .path: attrs["path"] ?? "/",
@@ -104,17 +156,111 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         guard let cookie = HTTPCookie(properties: props) else {
             log.warn("WebView", "cookie build failed name=\(name) domain=\(domain) sess=\(sessionId)")
-            return
+            return false
         }
         store.setCookie(cookie)
         log.info("WebView", "cookie injected name=\(name) domain=\(domain) httponly=\(attrs["httponly"] ?? "false") samesite=\(attrs["samesite"] ?? "") sess=\(sessionId)")
+        return true
     }
 
-    // FR-06 navigate. Watchdog handled by ActionDriver; here returns immediately.
+    // F-12: clear in-memory cookies for this session. logout must revoke the RUNTIME
+    // cookie store, not just the persistent Keychain layer — otherwise the live webview
+    // stays authenticated after Keychain delete. Synchronous (semaphore) so the caller
+    // can order it BEFORE webview destroy on main. NEVER call on the main thread (the
+    // completion dispatches to main; sync-wait on main deadlocks) — call off-main.
+    public func clearCookies() {
+        guard let store = webView?.configuration.websiteDataStore.httpCookieStore else { return }
+        if Thread.isMainThread {
+            log.warn("WebView", "clearCookies called on main; skipping sync wait (would deadlock) sess=\(sessionId)")
+            return
+        }
+        let sem = DispatchSemaphore(value: 0)
+        var count = 0
+        // getAllCookies completion dispatches on main (UI actor). delete via the
+        // completion-handler overload (the no-completion form is Swift-async), chaining
+        // a final signal so the off-main caller can wait synchronously.
+        store.getAllCookies { cookies in
+            count = cookies.count
+            let group = DispatchGroup()
+            for c in cookies {
+                group.enter()
+                store.delete(c) { group.leave() }
+            }
+            group.notify(queue: .main) { sem.signal() }
+        }
+        _ = sem.wait(timeout: .now() + .seconds(2))
+        log.info("WebView", "cleared \(count) in-memory cookies sess=\(sessionId)")
+    }
+
+    // FR-06 navigate. Watchdog handled by ActionDriver; here waits for didFinish/didFail.
+    // WKWebView.load MUST run on main (off-main -> SIGTRAP exit 133). Called from
+    // ActionDriver.dispatch inside the runWithWatchdog block on DispatchQueue.global(),
+    // so guard the main-thread hop. Sync-wait so the subsequent extract() re-queries
+    // the page that was actually loaded; never sync-wait ON main (deadlock).
+    // R-1: the old code only waited for the main-hop (load() issued) — extract then ran
+    // against a still-loading page -> stale/partial AXTree. Now arm a pending-nav slot on
+    // the WKNavigation returned by load(), and wait for the navigation delegate to signal
+    // didFinish/didFail (identity-matched by the WKNavigation object). On main thread the
+    // wait is skipped (would deadlock); create-with-initial-url on main is fire-and-forget
+    // (the next action re-extracts anyway).
+    // F-17: capture [weak self] (NOT a local strong `wv`) so a close() that nulls the
+    // webview during the wait can deallocate the WKWebView + its nonPersistent dataStore
+    // and injected cookies — a local strong ref pinned it past close, and a late enqueued
+    // load() fired on a torn-down session. The closure re-checks self.webView != nil
+    // before load; on timeout we stopLoading() to cancel a wedged navigation.
     public func navigate(url: String, timeoutMs: Int) {
-        guard let wv = webView, let u = URL(string: url) else { return }
-        wv.load(URLRequest(url: u))
-        log.info("WebView", "navigate \(url) sess=\(sessionId)")
+        guard let u = URL(string: url) else {
+            log.warn("WebView", "navigate bad url=\(url) sess=\(sessionId)")
+            return
+        }
+        // E-11/Finding 26: clear the previous nav's captured response BEFORE load so a
+        // stale status can't leak into this nav's Network.responseReceived. decidePolicyFor
+        // (below) refills it with the real status; for local schemes it stays nil -> status 0.
+        setLastResponse(nil)
+        if Thread.isMainThread {
+            webView?.load(URLRequest(url: u))
+            log.info("WebView", "navigate \(url) sess=\(sessionId) (main, no didFinish wait)")
+            return
+        }
+        let sem = DispatchSemaphore(value: 0)
+        var capturedNav: WKNavigation? = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let wv = self.webView else { sem.signal(); return }
+            capturedNav = wv.load(URLRequest(url: u))
+            // Arm the pending-nav slot so didFinish/didFail can signal THIS semaphore.
+            // R-1: race-safe — the delegate fires on main too, so install under navLock
+            // before we leave the main block; if didFinish somehow beats us (synchronous
+            // page) the signal is buffered in the semaphore and the wait returns at once.
+            self.navLock.lock()
+            self.pendingNav = (sem, capturedNav)
+            self.navLock.unlock()
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
+            log.warn("WebView", "navigate main-hop timeout \(url) sess=\(sessionId)")
+            webView?.stopLoading()
+            clearPendingNav()
+            return
+        }
+        // Wait for didFinish/didFail on the captured navigation. The main-hop semaphore
+        // above released once load() was issued (and the slot armed); this second wait is
+        // the real load-completion gate. Bounded by the same watchdog timeout budget.
+        let waited = sem.wait(timeout: .now() + .milliseconds(timeoutMs))
+        clearPendingNav()
+        if waited == .timedOut {
+            log.warn("WebView", "navigate didFinish timeout \(url) sess=\(sessionId)")
+            webView?.stopLoading()
+        } else {
+            log.info("WebView", "navigate \(url) sess=\(sessionId) (didFinish)")
+        }
+    }
+
+    // R-1: resolve + clear the pending-nav slot. Idempotent; called on both the success
+    // and timeout/teardown paths so a stale slot never signals a future navigate.
+    private func clearPendingNav() {
+        navLock.lock()
+        pendingNav = nil
+        navLock.unlock()
     }
 
     public func currentUrl() -> String { return webView?.url?.absoluteString ?? "" }
@@ -128,6 +274,12 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     // T2.1: sync JS eval. Blocks on semaphore until WKWebView callback fires.
     // Safe to call from a background queue (ActionDriver watchdog block); MUST NOT call on main
     // (would deadlock — WKWebView dispatches completion to main).
+    // L-7: on timeout the underlying evaluateJavaScript is still running on WKWebView's
+    // serialized JS queue, so the NEXT eval also blocks and times out — the session is wedged.
+    // Set jsWedged (loud, surfacable), then best-effort reload the current URL to drop the
+    // stuck script context (no public API cancels a running eval). The reload is async + on
+    // main; it does not block this caller. If the page re-wedges, subsequent heals no-op
+    // (guard the flag so we don't reload-loop).
     public func evaluateJSSync(_ script: String, timeoutMs: Int = 5_000) -> Any? {
         guard Thread.isMainThread == false else {
             log.error("WebView", "evaluateJSSync called on main -> would deadlock; returning nil")
@@ -140,24 +292,62 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
             sem.signal()
         }
         if sem.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
-            log.warn("WebView", "evaluateJSSync timeout script=\(script.prefix(80))")
+            jsWedged = true
+            // R-15: the script body can carry credential payloads (typeText text, evaluate
+            // expressions with secrets). The old log dumped script.prefix(80) to %{public}
+            // os_log + the stderr sink — plaintext secrets in operator logs / Console.app.
+            // Redact: log the length only (correlation via length + session), never the body.
+            log.error("WebView", "evaluateJSSync TIMEOUT -> JS pipeline wedged sess=\(sessionId) scriptLen=\(script.count); attempting self-heal reload")
+            selfHealReload()
             return nil
         }
+        // A completion that fires in time clears the wedge (the pipeline drained).
+        if jsWedged {
+            jsWedged = false
+            log.info("WebView", "JS pipeline recovered (eval completed) sess=\(sessionId)")
+        }
         return out
+    }
+
+    // L-7: drop the wedged JS context by reloading the current URL. Async on main; never
+    // blocks the caller. Guarded by jsWedged so a still-wedged page doesn't reload-loop on
+    // every subsequent timed-out eval (the flag only clears when an eval actually completes).
+    private func selfHealReload() {
+        guard jsWedged else { return }
+        let url = webView?.url?.absoluteString ?? ""
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let wv = self.webView else { return }
+            if let u = URL(string: url) {
+                wv.load(URLRequest(url: u))
+                self.log.warn("WebView", "self-heal reload \(url) sess=\(self.sessionId)")
+            } else {
+                wv.reload()
+                self.log.warn("WebView", "self-heal reload (no url) sess=\(self.sessionId)")
+            }
+        }
     }
 
     // T2.1: sync JS eval with string args interpolated into the script (no arguments[] API on macOS 14).
     // Replaces ONE __ARG__ placeholder per arg, in order. (replacingOccurrences replaces ALL
     // occurrences, which would fill every placeholder with the first arg and starve the rest —
     // that broke click/type: expectFp got the nodeId, fingerprint never matched -> node_stale.)
+    // F-16: each arg is serialized to a JSON string token (which includes its own surrounding
+    // double quotes and a fully escaped body) and the surrounding `="__ARG__"` literal in the
+    // script has its quotes stripped to `=__ARG__` so the JSON token supplies them. The old
+    // hand-rolled 3-char escape (\\, ", \n) left backtick/${}/CR/</script> unescaped — a payload
+    // with `;` or `}` broke the JS string and let the engine self-XSS via typeText. JSON
+    // serialization is the complete, correct string-literal escape.
     public func evaluateJSSyncArgs(_ script: String, args: [String], timeoutMs: Int = 5_000) -> Any? {
         var js = script
         for a in args {
-            let esc = a.replacingOccurrences(of: "\\", with: "\\\\")
-                        .replacingOccurrences(of: "\"", with: "\\\"")
-                        .replacingOccurrences(of: "\n", with: "\\n")
+            guard let tokenData = try? JSONSerialization.data(withJSONObject: [a]),
+                  let tokenArr = try? JSONSerialization.jsonObject(with: tokenData) as? [String],
+                  let escaped = tokenArr.first else {
+                log.warn("WebView", "arg JSON-serialize failed, dropping arg sess=\(sessionId)")
+                continue
+            }
             if let r = js.range(of: "__ARG__") {
-                js.replaceSubrange(r, with: esc)
+                js.replaceSubrange(r, with: escaped)
             }
         }
         return evaluateJSSync(js, timeoutMs: timeoutMs)
@@ -176,10 +366,22 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
             guard let wv = self?.webView else { sem.signal(); return }
             let cfg = WKSnapshotConfiguration()
             cfg.rect = CGRect(x: 0, y: 0, width: 1280, height: 800)
+            // afterScreenUpdates=false: reuse the last composited frame instead of forcing a
+            // fresh composite per snapshot (the page is static between actions).
+            cfg.afterScreenUpdates = false
             wv.takeSnapshot(with: cfg) { image, _ in
-                if let img = image, let tiff = img.tiffRepresentation,
-                   let rep = NSBitmapImageRep(data: tiff) {
-                    out = rep.representation(using: .png, properties: [:])
+                // E-7 memory: tiffRepresentation + NSBitmapImageRep each alloc ~4MB in the
+                // host and were retained per-snapshot (16MB/snapshot, never freed -> 1GB at
+                // 200 snapshots). Build the PNG via the CGImage backing the NSImage instead:
+                // takeSnapshot's NSImage wraps a CGImage; pull it, make a single
+                // NSBitmapImageRep from the CGImage (no tiff intermediate), PNG-encode, then
+                // nil the rep so its backing bitmap releases before the next snapshot. The
+                // resulting PNG Data is a value type and does not retain the bitmap.
+                autoreleasepool {
+                    if let img = image, let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                        let rep = NSBitmapImageRep(cgImage: cg)
+                        out = rep.representation(using: .png, properties: [:])
+                    }
                 }
                 sem.signal()
             }
@@ -195,6 +397,7 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView?.stopLoading()
         webView?.removeFromSuperview()
         webView = nil
+        setLastResponse(nil)
         hostWindow?.close()
         hostWindow = nil
         log.debug("WebView", "destroyed sess=\(sessionId)")
@@ -203,10 +406,48 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     // MARK: WKNavigationDelegate
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         log.info("WebView", "didFinish \(webView.url?.absoluteString ?? "") sess=\(sessionId)")
+        resolvePendingNav(navigation)
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         log.error("WebView", "didFail \(error.localizedDescription) sess=\(sessionId)")
+        resolvePendingNav(navigation)
+    }
+
+    public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        log.error("WebView", "didFailProvisional \(error.localizedDescription) sess=\(sessionId)")
+        resolvePendingNav(navigation)
+    }
+
+    // E-11/Finding 26: capture the real HTTP status/mimeType/headers of the main-document
+    // response so the CDP Network.responseReceived event reports truth (was always 200).
+    // decidePolicyFor fires for every navigation (main + subframe); keep only the main-frame
+    // one (isForMainFrame) since cowork's navigate is main-document only. Always .allow.
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        if navigationResponse.isForMainFrame, let http = navigationResponse.response as? HTTPURLResponse {
+            let headers = http.allHeaderFields as? [String: String] ?? [:]
+            setLastResponse((http.statusCode, http.mimeType ?? "", headers))
+            log.info("WebView", "nav response status=\(http.statusCode) mime=\(http.mimeType ?? "") sess=\(sessionId)")
+        }
+        decisionHandler(.allow)
+    }
+
+    // R-1: signal the pending navigate's completion if the finished/failed navigation is
+    // the one we're waiting on (identity match on the WKNavigation object). A mismatch
+    // (redirect-triggered subframe nav, etc.) is ignored so we only release on the
+    // top-level load we started. Idempotent: clearPendingNav on the caller side also
+    // nulls the slot, so a late delegate fire after timeout finds nil and no-ops.
+    private func resolvePendingNav(_ navigation: WKNavigation?) {
+        navLock.lock()
+        let pending = pendingNav
+        if let p = pending, let started = p.nav, let finished = navigation, started === finished {
+            pendingNav = nil
+            navLock.unlock()
+            p.sem.signal()
+        } else {
+            navLock.unlock()
+        }
     }
 
     // NFR-S1: block unauthorized cross-origin iframe + cancel downloads.

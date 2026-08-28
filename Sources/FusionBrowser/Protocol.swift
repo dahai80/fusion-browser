@@ -99,31 +99,45 @@ public struct BrowserStateResponse: Codable {
     public var title: String
     public var axTreeMarkdown: String
     public var interactiveNodes: [AXTreeNode]
+    // E-7: screenshotJpeg was a dead field (the .screenshot action fell through to a
+    // plain AXTree extract and never captured an image). Kept as a legacy nil for
+    // wire-schema backward compat; the live capture now populates screenshotPng (WKWebView
+    // takeSnapshot emits PNG, not JPEG — the old field name lied about the format too).
     public var screenshotJpeg: Data?
+    public var screenshotPng: Data?
     public var hasSecurityInjectionBlocked: Bool
     public var executionTimeMs: Int
     public var securityAudit: SecurityAuditResult?
     public var sessionRecovered: Bool
     public var error: FBError?
     public var traceId: String?
+    // E-9: real Runtime.evaluate result. JSON-encoded form of the JS expression's return
+    // value (NSString/NSNumber/NSNull/NSArray/NSDictionary from WKWebView JSON deserialization).
+    // nil for non-evaluate actions, or when the eval returned undefined/threw/timed out.
+    // CDP handleEvaluate decodes this into {result:{type,value}}; UDS callers may read it too.
+    public var evaluateResult: String?
 
     public init(sessionId: String, url: String, title: String, axTreeMarkdown: String,
                 interactiveNodes: [AXTreeNode], screenshotJpeg: Data? = nil,
+                screenshotPng: Data? = nil,
                 hasSecurityInjectionBlocked: Bool = false, executionTimeMs: Int = 0,
                 securityAudit: SecurityAuditResult? = nil, sessionRecovered: Bool = false,
-                error: FBError? = nil, traceId: String? = nil) {
+                error: FBError? = nil, traceId: String? = nil,
+                evaluateResult: String? = nil) {
         self.sessionId = sessionId
         self.url = url
         self.title = title
         self.axTreeMarkdown = axTreeMarkdown
         self.interactiveNodes = interactiveNodes
         self.screenshotJpeg = screenshotJpeg
+        self.screenshotPng = screenshotPng
         self.hasSecurityInjectionBlocked = hasSecurityInjectionBlocked
         self.executionTimeMs = executionTimeMs
         self.securityAudit = securityAudit
         self.sessionRecovered = sessionRecovered
         self.error = error
         self.traceId = traceId
+        self.evaluateResult = evaluateResult
     }
 }
 

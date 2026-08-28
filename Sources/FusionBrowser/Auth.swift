@@ -22,46 +22,137 @@ public struct FBCapabilities: OptionSet, Codable, Hashable {
 }
 
 public final class FBAuth {
-    private let expectedTokenHash: String?
+    // M-6: map keyed by token HASH, not raw token. Raw token never retained past init.
+    private let expectedTokenHash: [UInt8]
     private let queue = DispatchQueue(label: "fusion-browser.auth")
-    // token -> capabilities (Phase 1: single token, all-default; map ready for multi-client)
+    // hash(hex) -> capabilities. Keyed on hash so plaintext token leaves no heap footprint.
     private var tokenCaps: [String: FBCapabilities] = [:]
     private let log = FBLogger.shared
 
-    public init(token: String?) {
+    // caps: capabilities granted to the registered token. Defaults to `.default`
+    // (no evaluate — H-5 scoped-token model). An operator may elevate via the
+    // `tokenCapabilities` config key (e.g. ["evaluate"] or ["all"]) so the
+    // evaluate action becomes reachable; without it evaluate is cap-gated off
+    // (evaluate_denied). Fail-closed: an unknown cap name is dropped, never
+    // broadens — `parseCaps(["bogus"])` yields the empty set, not .all.
+    public init(token: String?, caps: FBCapabilities = .default) {
         if let t = token, !t.isEmpty {
-            let hash = SHA256.hash(data: Data(t.utf8)).map { String(format: "%02x", $0) }.joined()
-            self.expectedTokenHash = hash
-            tokenCaps[t] = FBCapabilities.default
+            let digest = SHA256.hash(data: Data(t.utf8))
+            self.expectedTokenHash = Array(digest)
+            let hex = digest.map { String(format: "%02x", $0) }.joined()
+            tokenCaps[hex] = caps
         } else {
-            self.expectedTokenHash = nil
+            // No token configured → deny-all sentinel (still fail-closed in authenticate).
+            self.expectedTokenHash = []
         }
+    }
+
+    // Parse a config string list into FBCapabilities. Accepted names match the
+    // FBCapabilities static members (case-insensitive); "all" → .all. Unknown
+    // names are dropped with a warning (fail-closed: never silently broaden).
+    // Empty list → empty set (deny-all for every action — explicit, not a default).
+    public static func parseCaps(_ names: [String]) -> FBCapabilities {
+        var caps: FBCapabilities = []
+        for raw in names {
+            let n = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            switch n {
+            case "all": caps.formUnion(.all)
+            case "navigate": caps.formUnion(.navigate)
+            case "click": caps.formUnion(.click)
+            case "type": caps.insert(.type)
+            case "scroll": caps.insert(.scroll)
+            case "screenshot": caps.insert(.screenshot)
+            case "evaluate": caps.insert(.evaluate)
+            case "close": caps.insert(.close)
+            default:
+                FBLogger.shared.warn("Auth", "unknown tokenCapabilities name=\(raw) dropped (fail-closed)")
+            }
+        }
+        return caps
     }
 
     // Returns capabilities if token valid, nil otherwise.
     public func authenticate(token: String?) -> FBCapabilities? {
-        guard let expected = expectedTokenHash else {
+        // Fail-closed: empty hash list = no token configured → deny all (L-19 contract).
+        if expectedTokenHash.isEmpty {
             log.warn("Auth", "no token configured; denying all (UDS must be authed)")
             return nil
         }
         guard let t = token, !t.isEmpty else { return nil }
-        let hash = SHA256.hash(data: Data(t.utf8)).map { String(format: "%02x", $0) }.joined()
-        guard hash == expected else {
+        let digest = SHA256.hash(data: Data(t.utf8))
+        let candidate = Array(digest)
+        // M-7: constant-time compare over hash bytes. No short-circuit on first differing
+        // byte; accumulates XOR difference across the full digest before deciding.
+        guard constantTimeEqual(candidate, expectedTokenHash) else {
             log.warn("Auth", "token mismatch")
             return nil
         }
-        return queue.sync { tokenCaps[t] ?? FBCapabilities.default }
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return queue.sync { tokenCaps[hex] ?? FBCapabilities.default }
+    }
+
+    // Constant-time byte compare. Length-mismatch is a public fact (digest size), not a
+    // secret, so it is allowed to early-return; the byte loop itself never short-circuits.
+    private func constantTimeEqual(_ a: [UInt8], _ b: [UInt8]) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<a.count { diff |= a[i] ^ b[i] }
+        return diff == 0
     }
 
     // FR-10: EVALUATE capability + origin whitelist.
+    // F-6: empty allowedOrigins denies (fail-closed), never "allow all".
+    // F-7: structured origin compare — not hasPrefix (which `https://example.com.evil.com`
+    // bypasses). An origin is scheme://host[:port]; compare scheme + host case-insensitively
+    // and port exactly. Opaque origins (about:blank, data:, blob:, javascript:) are rejected
+    // when a whitelist is configured.
     public func canEvaluate(caps: FBCapabilities, origin: String, allowedOrigins: [String]) -> Bool {
         guard caps.contains(.evaluate) else {
             log.warn("Auth", "evaluate capability missing")
             return false
         }
-        if allowedOrigins.isEmpty { return true }
-        let matched = allowedOrigins.contains { origin.hasPrefix($0) }
-        if !matched { log.warn("Auth", "evaluate origin not allowed: \(origin)") }
-        return matched
+        return isOriginAllowed(origin, allowedOrigins: allowedOrigins)
+    }
+
+    // Structured origin match shared by EVALUATE (F-7) and the CDP WS upgrade gate (F-3).
+    // Fail-closed: empty whitelist denies. Allowed entries may be `scheme://host[:port]`
+    // or bare `host` (defaults to https, any port). Opaque origins are rejected.
+    public func isOriginAllowed(_ origin: String, allowedOrigins: [String]) -> Bool {
+        if allowedOrigins.isEmpty {
+            log.warn("Auth", "evaluate origin denied: empty whitelist (fail-closed) origin=\(origin)")
+            return false
+        }
+        guard let parsed = parseOrigin(origin) else {
+            log.warn("Auth", "evaluate origin denied: opaque/invalid origin=\(origin)")
+            return false
+        }
+        for entry in allowedOrigins {
+            guard let allowed = parseOrigin(entry) else { continue }
+            if parsed.scheme.lowercased() == allowed.scheme.lowercased()
+                && parsed.host.lowercased() == allowed.host.lowercased()
+                && (allowed.port == nil || parsed.port == allowed.port) {
+                return true
+            }
+        }
+        log.warn("Auth", "evaluate origin not allowed: \(origin)")
+        return false
+    }
+
+    // Parse an origin string into (scheme, host, port). Accepts `scheme://host[:port]`
+    // or a bare `host` (scheme defaults to https). Returns nil for opaque origins
+    // (about:, data:, blob:, javascript:, file:) or unparseable input.
+    private func parseOrigin(_ s: String) -> (scheme: String, host: String, port: Int?)? {
+        let lower = s.lowercased()
+        for opaque in ["about:", "data:", "blob:", "javascript:", "file:"] {
+            if lower.hasPrefix(opaque) { return nil }
+        }
+        guard let comps = URLComponents(string: s) else { return nil }
+        guard let host = comps.host, !host.isEmpty, let scheme = comps.scheme, !scheme.isEmpty else {
+            // Bare host form (no scheme) — treat as https, host = the whole string trimmed.
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains("://") else { return nil }
+            return ("https", trimmed, nil)
+        }
+        return (scheme, host, comps.port)
     }
 }

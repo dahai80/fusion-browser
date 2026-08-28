@@ -7,13 +7,18 @@ public struct FBResourceQuota: Codable, Equatable {
     public var maxSessions: Int
     public var maxMemoryPerSessionMB: Int
     public var maxTotalMemoryMB: Int
-    public var maxWebContentProcesses: Int
+    // H-2: the old `maxWebContentProcesses` field was a DEAD field — declared, set to
+    // maxSessions, and read nowhere (grep confirmed). WKWebView's WebContent process count
+    // is governed by the shared WKProcessPool (WebView.sharedPool), NOT by any config knob;
+    // the field only made FR-08's "WebContent process cap" look implemented while providing
+    // zero enforcement (operators set it to 4, got 10 processes). Removed: no config key
+    // lies about an unenforced limit. The shared pool (one WebContent process family per
+    // engine) IS the real limiter; a session cap of maxSessions bounds the live pages.
 
-    public init(maxSessions: Int, maxMemoryPerSessionMB: Int, maxTotalMemoryMB: Int, maxWebContentProcesses: Int) {
+    public init(maxSessions: Int, maxMemoryPerSessionMB: Int, maxTotalMemoryMB: Int) {
         self.maxSessions = maxSessions
         self.maxMemoryPerSessionMB = maxMemoryPerSessionMB
         self.maxTotalMemoryMB = maxTotalMemoryMB
-        self.maxWebContentProcesses = maxWebContentProcesses
     }
 
     // NFR-R1: by physical RAM. 8GB -> 4 session, 16GB -> 10 session.
@@ -34,7 +39,7 @@ public struct FBResourceQuota: Codable, Equatable {
         let perSession = 150
         let total = sessions * perSession
         return FBResourceQuota(maxSessions: sessions, maxMemoryPerSessionMB: perSession,
-                               maxTotalMemoryMB: total, maxWebContentProcesses: sessions)
+                               maxTotalMemoryMB: total)
     }
 }
 
@@ -101,6 +106,12 @@ public struct FBEngineConfig: Codable {
     public var cdpPort: Int
     public var cdpEnabled: Bool
     public var authToken: String?
+    // H-5: capabilities granted to the configured authToken. Defaults to empty
+    // list → FBAuth uses .default (navigate/click/type/scroll/screenshot/close,
+    // NO evaluate). Set e.g. ["evaluate"] or ["all"] to make Runtime.evaluate
+    // reachable; without it evaluate is cap-gated off (evaluate_denied). Unknown
+    // names dropped fail-closed. Parsed by FBAuth.parseCaps at startup.
+    public var tokenCapabilities: [String]
     public var allowedOrigins: [String]
     public var quota: FBResourceQuota
     public var guards: FBSchedulingGuards
@@ -110,20 +121,30 @@ public struct FBEngineConfig: Codable {
     public var visualLocator: FBVisualLocatorConfig
     // P4-2: process-level RSS watchdog (OOM self-heal). Default off.
     public var memoryWatchdog: FBMemoryWatchdogConfig
+    // R-5: idle-session reaper. Default ON — a client that creates sessions and disconnects
+    // left them live forever, letting one client burn the whole session cap (quota DoS). The
+    // reaper closes sessions idle past idleTimeoutMs. Disable by setting enabled=false.
+    public var sessionReaper: FBSessionReaperConfig
+    // H-8: per-client rate limit (main-thread fair scheduling). Default ON.
+    public var rateLimit: FBRateLimitConfig
 
     public init(socketPath: String = "/tmp/fusion-browser.sock",
                 cdpPort: Int = 9222, cdpEnabled: Bool = false,
-                authToken: String? = nil, allowedOrigins: [String] = [],
+                authToken: String? = nil, tokenCapabilities: [String] = [],
+                allowedOrigins: [String] = [],
                 quota: FBResourceQuota = .forHost(),
                 guards: FBSchedulingGuards = FBSchedulingGuards(),
                 watchdog: FBWatchdogPolicyEncoder = FBWatchdogPolicyEncoder(),
                 logLevel: String = "info",
                 visualLocator: FBVisualLocatorConfig = FBVisualLocatorConfig(),
-                memoryWatchdog: FBMemoryWatchdogConfig = FBMemoryWatchdogConfig()) {
+                memoryWatchdog: FBMemoryWatchdogConfig = FBMemoryWatchdogConfig(),
+                sessionReaper: FBSessionReaperConfig = FBSessionReaperConfig(),
+                rateLimit: FBRateLimitConfig = FBRateLimitConfig()) {
         self.socketPath = socketPath
         self.cdpPort = cdpPort
         self.cdpEnabled = cdpEnabled
         self.authToken = authToken
+        self.tokenCapabilities = tokenCapabilities
         self.allowedOrigins = allowedOrigins
         self.quota = quota
         self.guards = guards
@@ -131,12 +152,14 @@ public struct FBEngineConfig: Codable {
         self.logLevel = logLevel
         self.visualLocator = visualLocator
         self.memoryWatchdog = memoryWatchdog
+        self.sessionReaper = sessionReaper
+        self.rateLimit = rateLimit
     }
 
     public static let `default` = FBEngineConfig()
 
     enum CodingKeys: String, CodingKey {
-        case socketPath, cdpPort, cdpEnabled, authToken, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog
+        case socketPath, cdpPort, cdpEnabled, authToken, tokenCapabilities, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog, sessionReaper, rateLimit
     }
 
     public init(from decoder: Decoder) throws {
@@ -146,6 +169,7 @@ public struct FBEngineConfig: Codable {
         cdpPort = try c.decodeIfPresent(Int.self, forKey: .cdpPort) ?? d.cdpPort
         cdpEnabled = try c.decodeIfPresent(Bool.self, forKey: .cdpEnabled) ?? d.cdpEnabled
         authToken = try c.decodeIfPresent(String.self, forKey: .authToken) ?? d.authToken
+        tokenCapabilities = try c.decodeIfPresent([String].self, forKey: .tokenCapabilities) ?? d.tokenCapabilities
         allowedOrigins = try c.decodeIfPresent([String].self, forKey: .allowedOrigins) ?? d.allowedOrigins
         quota = try c.decodeIfPresent(FBResourceQuota.self, forKey: .quota) ?? d.quota
         guards = try c.decodeIfPresent(FBSchedulingGuards.self, forKey: .guards) ?? d.guards
@@ -153,6 +177,23 @@ public struct FBEngineConfig: Codable {
         logLevel = try c.decodeIfPresent(String.self, forKey: .logLevel) ?? d.logLevel
         visualLocator = try c.decodeIfPresent(FBVisualLocatorConfig.self, forKey: .visualLocator) ?? d.visualLocator
         memoryWatchdog = try c.decodeIfPresent(FBMemoryWatchdogConfig.self, forKey: .memoryWatchdog) ?? d.memoryWatchdog
+        sessionReaper = try c.decodeIfPresent(FBSessionReaperConfig.self, forKey: .sessionReaper) ?? d.sessionReaper
+        rateLimit = try c.decodeIfPresent(FBRateLimitConfig.self, forKey: .rateLimit) ?? d.rateLimit
+    }
+}
+
+// R-5: idle-session reaper config. Closes sessions with no executed action for
+// idleTimeoutMs, checked every checkIntervalMs. Default ON (quota-DoS protection).
+public struct FBSessionReaperConfig: Codable, Equatable {
+    public var enabled: Bool
+    public var idleTimeoutMs: Int
+    public var checkIntervalMs: Int
+
+    public init(enabled: Bool = true, idleTimeoutMs: Int = 1_800_000,
+                checkIntervalMs: Int = 60_000) {
+        self.enabled = enabled
+        self.idleTimeoutMs = idleTimeoutMs
+        self.checkIntervalMs = checkIntervalMs
     }
 }
 

@@ -129,8 +129,16 @@ public enum FBWalkerScript {
         var attrs=[];
         var keep=["id","name","type","role","href","aria-label","placeholder","data-test"];
         for(var i=0;i<keep.length;i++){ var v=el.getAttribute(keep[i]); if(v) attrs.push(keep[i]+"="+v.substring(0,40)); }
-        var txt=(el.innerText||"").trim().substring(0,24);
-        return tag+"|"+attrs.join(",")+"|"+txt+"|"+docPath(el);
+        // L-3: fingerprint is STRUCTURAL only. The old code appended
+        // (el.innerText||"").trim().substring(0,24) — but innerText is MUTABLE across
+        // extracts: a button label flipping "Subscribe"->"Subscribed", or an input value
+        // changing, mutates the fingerprint. resolveClick re-computes fp the same way and
+        // compares, so a label change on a STILL-LIVE node made the click return stale:true
+        // (false rejection). And resolveType (L-2) never compared fp at all, so typing
+        // raced blind. Drop text/value from the fingerprint — tag + stable attrs + docPath
+        // is stable across re-renders that keep the same element identity. Both resolvers
+        // re-derive fp the same way (no txt) so a live node matches.
+        return tag+"|"+attrs.join(",")+"|"+docPath(el);
     }
     // T2.2: static hidden-vector rules.
     function staticHidden(el){
@@ -195,14 +203,24 @@ public enum FBWalkerScript {
                   currentValue:val, fingerprint:fp, docPath:docPath(el),
                   hiddenFlags:sh, renderHidden:rh};
         // T2.2 purge: hide text content but keep node if interactive+visible.
-        if(Object.keys(sh).length>0 || rh){
+        // L-4: a hidden (display:none / offscreen / render-covered) node must NOT be
+        // actionable. The old code still did window.__fbMap.set(id, WeakRef(el)) for
+        // purged nodes — only blanking node.name. So a click on @eN resolved the WeakRef,
+        // el.click() fired the hidden element's handler directly (elementFromPoint wouldn't
+        // hit it, but .click() bypasses hit-testing and invokes the handler). An invisible
+        // node stayed fully clickable. Fix: keep the node in `out` (so the markdown tree
+        // still shows it for locate/context), but do NOT register it in __fbMap. With no
+        // map entry, resolveClick/resolveType return {ok:false,stale:true} -> the action
+        // surfaces node_stale instead of firing a hidden handler. hiddenFlags/renderHidden
+        // = the purge signal; absence from the map = the action rejection.
+        var purgedNode = Object.keys(sh).length>0 || rh;
+        if(purgedNode){
             purged++;
             for(var k in sh){ rulesHit[k]=true; }
             if(rh) rulesHit["render:hidden"]=true;
-            // keep node in tree (for locate) but blank its name = purge text.
             node.name="";
             out.push(node);
-            try{ window.__fbMap.set(id, new WeakRef(el)); }catch(e){}
+            // L-4: intentionally NO __fbMap.set — purged nodes are not actionable.
         } else {
             out.push(node);
             try{ window.__fbMap.set(id, new WeakRef(el)); }catch(e){}
@@ -214,10 +232,13 @@ public enum FBWalkerScript {
 """#
 
     // Resolve + click: re-find node by @eN via WeakRef; click if alive + fingerprint match.
-    // Args interpolated via __ARG__ placeholders (id, expectFp).
+    // Args interpolated via __ARG__ placeholders (id, expectFp). F-16: placeholders are BARE
+    // (no surrounding quotes); evaluateJSSyncArgs serializes each arg to a JSON string token
+    // (e.g. "e1") that supplies the quotes, so the engine cannot self-XSS via a payload
+    // containing backticks/${}/CR. Keep `=__ARG__` (no quotes) so `id="e1"` is formed.
     public static let resolveClick = #"""
 (function(){
-    var id="__ARG__", expectFp="__ARG__";
+    var id=__ARG__, expectFp=__ARG__;
     var ref=window.__fbMap && window.__fbMap.get(id);
     if(!ref) return JSON.stringify({ok:false, stale:true});
     var el=ref.deref();
@@ -225,10 +246,12 @@ public enum FBWalkerScript {
     var tag=el.tagName.toLowerCase();
     var attrs=[]; var keep=["id","name","type","role","href","aria-label","placeholder","data-test"];
     for(var i=0;i<keep.length;i++){ var v=el.getAttribute(keep[i]); if(v) attrs.push(keep[i]+"="+v.substring(0,40)); }
-    var txt=(el.innerText||"").trim().substring(0,24);
+    // L-3: re-derive fp WITHOUT text (must match the extract-time fingerprint, which also
+    // dropped innerText). The old code appended txt here; with the extract side fixed, a
+    // mismatch would make EVERY live click stale. Structural only: tag|attrs|docPath.
     var parts=[]; var cur=el; var depth=0;
     while(cur&&cur.nodeType===1&&depth<8){ var t=cur.tagName.toLowerCase(); var sib=cur.parentNode?Array.prototype.indexOf.call(cur.parentNode.children,cur):-1; parts.unshift(t+(sib>=0?("["+(sib+1)+"]"):"")); cur=cur.parentNode; depth++; }
-    var fp=tag+"|"+attrs.join(",")+"|"+txt+"|"+parts.join("/");
+    var fp=tag+"|"+attrs.join(",")+"|"+parts.join("/");
     if(expectFp && fp!==expectFp) return JSON.stringify({ok:false, stale:true});
     el.scrollIntoView({block:"center"});
     el.click();
@@ -237,18 +260,53 @@ public enum FBWalkerScript {
 """#
 
     // Resolve + type: re-find by @eN, set value, dispatch input event.
-    // Args interpolated via __ARG__ placeholders (id, expectFp, text).
+    // Args interpolated via __ARG__ placeholders (id, expectFp, text). F-16: bare placeholders
+    // (see resolveClick) — the JSON-string token supplies quotes, so a payload text with
+    // backticks/${}/CR is a safe string literal, not an injection vector.
+    // L-2: expectFp was declared + interpolated but NEVER compared (resolveClick L235 did).
+    // A recycled @eN whose WeakRef, after an SPA re-render, points at a DIFFERENT element
+    // reusing the same tag/docPath would type into the wrong element with ok:true,stale:false.
+    // Mirror resolveClick's fingerprint stale check before touching the element.
     public static let resolveType = #"""
 (function(){
-    var id="__ARG__", expectFp="__ARG__", text="__ARG__";
+    var id=__ARG__, expectFp=__ARG__, text=__ARG__;
     var ref=window.__fbMap && window.__fbMap.get(id);
     if(!ref) return JSON.stringify({ok:false, stale:true});
     var el=ref.deref();
     if(!el) return JSON.stringify({ok:false, stale:true});
+    var tag=el.tagName.toLowerCase();
+    var attrs=[]; var keep=["id","name","type","role","href","aria-label","placeholder","data-test"];
+    for(var i=0;i<keep.length;i++){ var v=el.getAttribute(keep[i]); if(v) attrs.push(keep[i]+"="+v.substring(0,40)); }
+    var parts=[]; var cur=el; var depth=0;
+    while(cur&&cur.nodeType===1&&depth<8){ var t=cur.tagName.toLowerCase(); var sib=cur.parentNode?Array.prototype.indexOf.call(cur.parentNode.children,cur):-1; parts.unshift(t+(sib>=0?("["+(sib+1)+"]"):"")); cur=cur.parentNode; depth++; }
+    var fp=tag+"|"+attrs.join(",")+"|"+parts.join("/");
+    if(expectFp && fp!==expectFp) return JSON.stringify({ok:false, stale:true});
     el.focus();
-    el.value=text;
-    el.dispatchEvent(new Event("input",{bubbles:true}));
-    el.dispatchEvent(new Event("change",{bubbles:true}));
+    // R-10: a bare el.value=text is SILENTLY DROPPED by React/Vue/Angular controlled
+    // inputs — the framework overrode the value setter on the instance (or hijacks the
+    // property descriptor) so a direct assignment updates the DOM attr but never fires
+    // the framework's onChange handler -> the typed text never reaches the framework
+    // state (form silently appears empty). Fix: invoke the NATIVE prototype value setter
+    // (which the framework's tracker listens to) via the descriptor, then dispatch an
+    // InputEvent (not a bare Event) so inputType/data/isTrusted carry what a real
+    // keystroke would. Falls back to the plain assignment for elements that have no
+    // native value setter (contenteditable, custom elements) so we don't regress those.
+    var nativeSetter = null;
+    try {
+        var proto = (el.tagName === "TEXTAREA" || el.tagName === "textarea")
+            ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        var desc = Object.getOwnPropertyDescriptor(proto, "value");
+        if(desc && typeof desc.set === "function") nativeSetter = desc.set;
+    } catch(e) { nativeSetter = null; }
+    if(nativeSetter) {
+        nativeSetter.call(el, text);
+        try { el.dispatchEvent(new InputEvent("input", {bubbles:true, inputType:"insertText", data:text})); } catch(e) { el.dispatchEvent(new Event("input",{bubbles:true})); }
+        el.dispatchEvent(new Event("change",{bubbles:true}));
+    } else {
+        el.value = text;
+        el.dispatchEvent(new Event("input",{bubbles:true}));
+        el.dispatchEvent(new Event("change",{bubbles:true}));
+    }
     return JSON.stringify({ok:true, stale:false});
 })();
 """#

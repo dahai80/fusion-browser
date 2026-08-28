@@ -20,6 +20,7 @@ public final class FBAXTreeExtractor {
 
     // T2.1: run injected walker via FBWebView, parse FBExtractResult.
     // Sync wrapper: blocks on semaphore (called from ActionDriver watchdog block on bg queue).
+    // E-17~20 (#68): pure-Swift extractor — Rust core removed; FBAXTreeReducer is the only path.
     public func extract(webview: FBWebView) -> (result: FBExtractResult?, markdown: String, audit: SecurityAuditResult, error: FBError?) {
         guard let raw = webview.evaluateJSSync(FBWalkerScript.extract) as? String else {
             log.warn("AXTree", "walker returned non-string")
@@ -35,15 +36,12 @@ public final class FBAXTreeExtractor {
             log.warn("AXTree", "decode walker failed: \(error)")
             return (nil, "", SecurityAuditResult(), .internalError)
         }
-        // Install stable mapping from extracted nodes.
+        // Install stable mapping from extracted nodes (Swift-only — owns the JS WeakRef map).
         mapping.install(res.nodes)
-        // Build reduced interactive nodes for the wire schema (T2.1 compression).
-        let reduced = res.nodes.map { FBAXTreeReducer.toWireNode($0) }
         let md = FBAXTreeReducer.toMarkdown(res)
         let audit = SecurityAuditResult(nodesAudited: res.nodesAudited,
                                         hiddenNodesPurged: res.hiddenNodesPurged,
                                         matchedRules: res.matchedRules)
-        _ = reduced
         log.info("AXTree", "extracted nodes=\(res.nodes.count) purged=\(res.hiddenNodesPurged) rules=\(res.matchedRules)")
         return (res, md, audit, nil)
     }
