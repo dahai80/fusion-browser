@@ -59,6 +59,12 @@ final class AuthTests: XCTestCase {
         XCTAssertEqual(FBAuth.parseCaps(["navigate", "evaluate"]),
                        [.navigate, .evaluate])
         XCTAssertEqual(FBAuth.parseCaps(["all"]), .all)
+        // R-3: metrics cap parsed, "all" includes it, default lacks it.
+        XCTAssertEqual(FBAuth.parseCaps(["metrics"]), .metrics)
+        XCTAssertTrue(FBAuth.parseCaps(["all"]).contains(.metrics),
+                      "all-caps must include metrics")
+        XCTAssertFalse(FBCapabilities.default.contains(.metrics),
+                       "default must lack metrics (opt-in via tokenCapabilities)")
     }
 
     func testParseCapsUnknownDroppedFailClosed() {
@@ -79,6 +85,61 @@ final class AuthTests: XCTestCase {
         let plain = FBAuth(token: "t")
         XCTAssertFalse(plain.authenticate(token: "t")!.contains(.evaluate),
                        "default token must still lack evaluate (H-5 scoped model)")
+    }
+}
+
+// R-3/B-3: metrics read path. FBMetrics.metricsArray() must surface counters +
+// latency quantiles (was write-only — snapshot() had zero callers, CDP returned []).
+final class MetricsTests: XCTestCase {
+    func testMetricsArraySurfacesCountersAndLatency() {
+        // Distinct keys so concurrent tests don't collide on the shared singleton.
+        let ctrKey = "test.metrics.counter.\(FBTrace.newId())"
+        let latKey = "test.metrics.latency.\(FBTrace.newId())"
+        FBMetrics.shared.increment(ctrKey, by: 3)
+        FBMetrics.shared.recordLatency(latKey, ms: 10)
+        FBMetrics.shared.recordLatency(latKey, ms: 20)
+        FBMetrics.shared.recordLatency(latKey, ms: 30)
+        let arr = FBMetrics.shared.metricsArray()
+        let ctr = arr.first { $0.name == ctrKey }
+        XCTAssertNotNil(ctr, "counter must appear in metrics array")
+        XCTAssertEqual(ctr?.value, 3.0)
+        // Latency key expands to count/p50/p95 triple.
+        let count = arr.first { $0.name == "\(latKey).count" }
+        let p50 = arr.first { $0.name == "\(latKey).p50_ms" }
+        let p95 = arr.first { $0.name == "\(latKey).p95_ms" }
+        XCTAssertNotNil(count, "latency count metric must appear")
+        XCTAssertEqual(count?.value, 3.0)
+        XCTAssertNotNil(p50, "latency p50 metric must appear")
+        XCTAssertEqual(p50?.value, 20.0, "p50 of [10,20,30] sorted mid = 20")
+        XCTAssertNotNil(p95, "latency p95 metric must appear")
+        XCTAssertEqual(p95?.value, 30.0, "p95 of 3 samples idx min(2, 2.85->2) = 30")
+    }
+
+    func testMetricsResponseRoundTripsCodable() throws {
+        let resp = MetricsResponse(
+            counters: [FBMetrics.FBMetric(name: "session.created", value: 5)],
+            latency: [FBMetrics.FBMetric(name: "action.click.p50_ms", value: 12)])
+        let data = try FBFrame.encode(FBResponse.metrics(resp))
+        XCTAssertGreaterThan(data.count, 4)
+        let json = data.subdata(in: 4..<data.count)
+        let back = try FBFrame.decode(json, as: FBResponse.self)
+        guard case .metrics(let m) = back else {
+            return XCTFail("decoded response must be .metrics")
+        }
+        XCTAssertEqual(m.counters.first?.name, "session.created")
+        XCTAssertEqual(m.counters.first?.value, 5.0)
+        XCTAssertEqual(m.latency.first?.name, "action.click.p50_ms")
+        XCTAssertEqual(m.latency.first?.value, 12.0)
+    }
+
+    func testMetricsRequestRoundTripsCodable() throws {
+        let data = try FBFrame.encode(FBRequest.metrics)
+        XCTAssertGreaterThan(data.count, 4)
+        let json = data.subdata(in: 4..<data.count)
+        let back = try FBFrame.decode(json, as: FBRequest.self)
+        guard case .metrics = back else {
+            return XCTFail("decoded request must be .metrics")
+        }
     }
 }
 

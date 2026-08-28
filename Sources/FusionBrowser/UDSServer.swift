@@ -227,6 +227,19 @@ final class FBClientConnection {
             let err = manager.close(sessionId: sid)
             if let e = err { send(error: e) }
             else { send(resp: .closed(sessionId: sid)) }
+        case .metrics:
+            // R-3/B-3: read-only engine metrics. Capability-gated (.metrics, NOT in .default —
+            // operator opts in via tokenCapabilities). Returns counters + latency quantiles.
+            // Split by suffix: latency triples end in .count/.p50_ms/.p95_ms (derived from
+            // recordLatency keys); raw increment() counters never use those suffixes.
+            guard caps.contains(.metrics) else { send(error: .authDenied); return }
+            let arr = FBMetrics.shared.metricsArray()
+            let isLatency = { (n: String) in
+                n.hasSuffix(".p50_ms") || n.hasSuffix(".p95_ms") || n.hasSuffix(".count")
+            }
+            let counters = arr.filter { !isLatency($0.name) }
+            let latency = arr.filter { isLatency($0.name) }
+            send(resp: .metrics(MetricsResponse(counters: counters, latency: latency)))
         }
     }
 

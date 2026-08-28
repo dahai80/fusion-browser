@@ -8,7 +8,7 @@
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release          # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox    # full suite, 183 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox    # full suite, 186 tests (--disable-sandbox no longer required:
                                 #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 swift test --disable-sandbox --filter AXTreeTests/StableMappingTests   # single method
@@ -170,7 +170,7 @@ A new action touches several points — keep them in sync:
   contract — update it when the wire schema or action contract changes.
 - **Keep the test count and landed fixes current** in `README.md` /
   `README_CN.md` (e.g. node-id bare `eN` fix, E-17~20 Rust removal, test count).
-  The suite is 183 tests (Rust-core parity + worker-pool tests removed in
+  The suite is 186 tests (Rust-core parity + worker-pool tests removed in
   E-17~20 / #68); stale numbers erode trust faster than no number.
 - **Clean up process data after verification** — keep only final outputs + logs.
   `scripts/*-report.json` is gitignored; do not commit transient run artifacts.

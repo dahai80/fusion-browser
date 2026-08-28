@@ -96,7 +96,7 @@ Each a single file (see source map in `README.md`):
 | Framing | `Framing.swift` | FR-09 frame reader, multi-frame split, overflow backpressure drop |
 | Auth | `Auth.swift` | FR-10 token + capabilities, EVALUATE origin whitelist |
 | ErrorModel | `ErrorModel.swift` | FR-11 structured `{code,message,retryable}` + `FBResult` |
-| Observability | `Observability.swift` | FR-12 metrics + trace_id + credential audit log |
+| Observability | `Observability.swift` | FR-12 metrics + trace_id + credential audit log. R-3/B-3: `metricsArray()` surfaces counters + latency p50/p95 via UDS `{type:"metrics"}` (`.metrics` cap, opt-in) + CDP `Performance.getMetrics` (was write-only / empty `[]`) |
 | Session | `Session.swift` | scheduler: admit / repeat-break / rebuild-depth-cap / idempotent classify |
 
 ## 5. CDP-over-WS Shim Layer

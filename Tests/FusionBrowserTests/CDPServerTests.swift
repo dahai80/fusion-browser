@@ -157,9 +157,17 @@ final class CDPTranslatorTests: XCTestCase {
         XCTAssertEqual(err?["code"] as? Int, -32000, "resolveNode must not fake an unregistered objectId")
     }
 
-    func testPerformanceMetricsEmpty() {
+    func testPerformanceMetricsReturnsRealValues() {
+        // R-3/B-3: Performance.getMetrics returns REAL engine metrics, not an empty list.
+        // Record a distinct counter so the result is non-empty regardless of shared state.
+        let key = "test.cdp.metrics.\(FBTrace.newId())"
+        FBMetrics.shared.increment(key, by: 7)
         let r = dispatch("Performance.getMetrics")
-        XCTAssertTrue(((r["result"] as? [String: Any])?["metrics"] as? [Any])?.isEmpty ?? false)
+        let metrics = (r["result"] as? [String: Any])?["metrics"] as? [[String: Any]]
+        XCTAssertNotNil(metrics, "metrics array must be present")
+        XCTAssertFalse(metrics?.isEmpty ?? true, "metrics must not be empty (was [] before R-3)")
+        let entry = metrics?.first { ($0["name"] as? String) == key }
+        XCTAssertEqual(entry?["value"] as? Double, 7.0, "recorded counter must surface with its value")
     }
 
     func testPageNavigateReturnsFrameId() {

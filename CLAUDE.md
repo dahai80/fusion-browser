@@ -13,11 +13,11 @@ emitter (T3.3) + visual-grounding fallback via fusion-mlx VLM (T3.4); Phase 4 ad
 FR-04 non-persistence verification (P4-1) + RSS watchdog/OOM self-heal (P4-2) +
 perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action
 long-run no-leak (P4-5). T3.1 (agent-studio 对接) is cross-project: contract doc +
-issue only on this side, code lands in fusion-agent-studio. Build green, 183 tests
+issue only on this side, code lands in fusion-agent-studio. Build green, 186 tests
 pass, end-to-end UDS smoke pass, CDP `:9222` smoke pass, T3.4 verified via real VLM
 smoke, Phase 4 all verified via release binary + Python verify scripts
 (`scripts/verify_nonpersistent.py` / `perf_bench.py` / `uma_coexist.py` /
-`longrun_leak.py` → reports in `scripts/*-report.json`).
+`longrun_leak.py` / `metrics_smoke.py` → reports in `scripts/*-report.json`).
 Source lives in `Sources/FusionBrowser/`, tests in `Tests/FusionBrowserTests/`.
 
 Authoritative spec: `architecture/fusion-browser-prd-0826.md` (v2.0). Audit:
@@ -29,7 +29,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 183 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 186 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -63,6 +63,11 @@ freely),
 elevates the registered token's capabilities, e.g. `["evaluate"]` or `["all"]`.
 The default token lacks `.evaluate` (H-5 scoped-token model), so without this
 key the UDS/CDP evaluate action is cap-gated off (`evaluate_denied` / `.authDenied`).
+R-3/B-3 added `.metrics` (read-only engine metrics) — also NOT in `.default`; set
+`["metrics"]` (or `["all"]`) to make the UDS `{type:"metrics"}` request and CDP
+`Performance.getMetrics` return real counters + latency quantiles (p50/p95).
+Without it the metrics read path is cap-gated off (`.authDenied`); CDP
+`Performance.getMetrics` is Bearer-gated at the WS upgrade, not per-method.
 Parsed by `FBAuth.parseCaps`: names case-insensitive, match `FBCapabilities`
 members; "all" → `.all`; unknown names dropped fail-closed (never broaden)),
 `visualLocator` (T3.4 visual-grounding fallback, default OFF — sub-keys

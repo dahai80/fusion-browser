@@ -16,8 +16,12 @@ public struct FBCapabilities: OptionSet, Codable, Hashable {
     public static let screenshot = FBCapabilities(rawValue: 1 << 4)
     public static let evaluate = FBCapabilities(rawValue: 1 << 5)
     public static let close    = FBCapabilities(rawValue: 1 << 6)
+    // R-3/B-3: read-only engine metrics. NOT in .default — an operator must opt in via
+    // tokenCapabilities (e.g. ["metrics"] or ["all"]) to read counters/latency quantiles.
+    // Without it the UDS metrics request + CDP Performance.getMetrics are cap-gated off.
+    public static let metrics  = FBCapabilities(rawValue: 1 << 7)
 
-    public static let all: FBCapabilities = [.navigate, .click, .type, .scroll, .screenshot, .evaluate, .close]
+    public static let all: FBCapabilities = [.navigate, .click, .type, .scroll, .screenshot, .evaluate, .close, .metrics]
     public static let `default`: FBCapabilities = [.navigate, .click, .type, .scroll, .screenshot, .close]
 }
 
@@ -64,6 +68,7 @@ public final class FBAuth {
             case "screenshot": caps.insert(.screenshot)
             case "evaluate": caps.insert(.evaluate)
             case "close": caps.insert(.close)
+            case "metrics": caps.insert(.metrics)
             default:
                 FBLogger.shared.warn("Auth", "unknown tokenCapabilities name=\(raw) dropped (fail-closed)")
             }

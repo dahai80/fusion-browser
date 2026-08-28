@@ -141,14 +141,27 @@ public struct BrowserStateResponse: Codable {
     }
 }
 
-// Top-level envelope so server can route CreateSession / Execute / Close.
+// R-3/B-3: read-only engine metrics response. counters = [name,value] pairs,
+// latency = per-key {count,p50_ms,p95_ms}. Populated by FBMetrics.metricsArray().
+public struct MetricsResponse: Codable {
+    public var counters: [FBMetrics.FBMetric]
+    public var latency: [FBMetrics.FBMetric]
+
+    public init(counters: [FBMetrics.FBMetric] = [], latency: [FBMetrics.FBMetric] = []) {
+        self.counters = counters
+        self.latency = latency
+    }
+}
+
+// Top-level envelope so server can route CreateSession / Execute / Close / Metrics.
 public enum FBRequest: Codable {
     case createSession(CreateSessionRequest)
     case execute(BrowserActionRequest)
     case close(sessionId: String)
+    case metrics
 
     private enum CodingKeys: String, CodingKey { case type, payload, sessionId }
-    private enum ReqType: String, Codable { case createSession = "create_session", execute, close }
+    private enum ReqType: String, Codable { case createSession = "create_session", execute, close, metrics }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -163,6 +176,8 @@ public enum FBRequest: Codable {
         case .close:
             let sid = try c.decode(String.self, forKey: .sessionId)
             self = .close(sessionId: sid)
+        case .metrics:
+            self = .metrics
         }
     }
 
@@ -178,6 +193,8 @@ public enum FBRequest: Codable {
         case .close(let sid):
             try c.encode(ReqType.close, forKey: .type)
             try c.encode(sid, forKey: .sessionId)
+        case .metrics:
+            try c.encode(ReqType.metrics, forKey: .type)
         }
     }
 
@@ -186,6 +203,7 @@ public enum FBRequest: Codable {
         case .createSession: return nil
         case .execute(let r): return r.traceId
         case .close: return nil
+        case .metrics: return nil
         }
     }
 }
@@ -194,10 +212,11 @@ public enum FBResponse: Codable {
     case createSession(CreateSessionResponse)
     case state(BrowserStateResponse)
     case closed(sessionId: String)
+    case metrics(MetricsResponse)
     case error(FBError)
 
     private enum CodingKeys: String, CodingKey { case type, payload, sessionId }
-    private enum RespType: String, Codable { case createSession = "create_session", state, closed, error }
+    private enum RespType: String, Codable { case createSession = "create_session", state, closed, metrics, error }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -209,6 +228,8 @@ public enum FBResponse: Codable {
             self = .state(try c.decode(BrowserStateResponse.self, forKey: .payload))
         case .closed:
             self = .closed(sessionId: try c.decode(String.self, forKey: .sessionId))
+        case .metrics:
+            self = .metrics(try c.decode(MetricsResponse.self, forKey: .payload))
         case .error:
             self = .error(try c.decode(FBError.self, forKey: .payload))
         }
@@ -226,6 +247,9 @@ public enum FBResponse: Codable {
         case .closed(let sid):
             try c.encode(RespType.closed, forKey: .type)
             try c.encode(sid, forKey: .sessionId)
+        case .metrics(let p):
+            try c.encode(RespType.metrics, forKey: .type)
+            try c.encode(p, forKey: .payload)
         case .error(let e):
             try c.encode(RespType.error, forKey: .type)
             try c.encode(e, forKey: .payload)

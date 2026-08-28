@@ -100,7 +100,7 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 183 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 186 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 

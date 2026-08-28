@@ -895,7 +895,15 @@ final class FBCDPTranslator {
             // WKWebView viewport is fixed; acknowledge override, no-op.
             return ok(id, result: [:])
         case "Performance.getMetrics":
-            return ok(id, result: ["metrics": []])
+            // R-3/B-3: return REAL engine metrics, not an empty list. CDP shape:
+            // {metrics:[{name,value}]} — counters + latency quantiles flattened.
+            // Bearer-gated at the WS upgrade (H-5); the .metrics capability maps to
+            // the configured token (tokenCapabilities "metrics"/"all"), so an
+            // un-elevated token still gets the live counters here (CDP has no
+            // per-method cap layer — the gate is the Bearer token itself).
+            let arr = FBMetrics.shared.metricsArray()
+            let metrics: [[String: Any]] = arr.map { m in ["name": m.name, "value": m.value] }
+            return ok(id, result: ["metrics": metrics])
         case "HeapProfiler.takeHeapSnapshot", "Tracing.start", "Tracing.end":
             return ok(id, result: [:])
         default:

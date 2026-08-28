@@ -3,7 +3,7 @@
 # swift test covers 0% of the WKWebView live path (ARCH-3: no main run loop under
 # swift test -> evaluateJSSync/screenshotSync deadlock). The live path is verified ONLY
 # by the built release binary + the Python verify harnesses in scripts/. This gate
-# wires them into one PASS/FAIL gate so "183 tests green" can never be misread as a
+# wires them into one PASS/FAIL gate so "186 tests green" can never be misread as a
 # live-path regression pass.
 #
 # E-17~20 (#68): Rust core removed — build is pure Swift now, no plugin, no cargo.
@@ -13,13 +13,14 @@
 #
 # Gate stages (each is a hard gate — first failure aborts with non-zero exit):
 #   1. swift build -c release --disable-sandbox   (pure Swift, no plugin)
-#   2. swift test --disable-sandbox               (deterministic unit tests, 183)
+#   2. swift test --disable-sandbox               (deterministic unit tests, 186)
 #   3. live-path verify harnesses against the release binary:
 #        verify_nonpersistent.py  (FR-04 non-persistence)
 #        navigate_execute_smoke.py (create-no-url -> execute navigate -> extract)
 #        evaluate_smoke.py         (E-9 Runtime.evaluate returns real JS result)
 #        cdp_dom_smoke.py          (E-8 CDP DOM domain derefs real elements)
 #        cdp_event_smoke.py        (E-11 CDP events: real status, console, order, per-nav loaderId)
+#        metrics_smoke.py          (R-3/B-3 UDS metrics read path: real counters + p50/p95)
 #        longrun_leak.py           (1000-action no-leak)
 #        uma_coexist.py            (UMA coexistence baseline)
 #      perf_bench.py is informational (perf, not correctness), NOT a hard gate —
@@ -57,8 +58,8 @@ run_gate() {
 # --- stage 1: build ---
 run_gate "swift build -c release" swift build -c release --disable-sandbox
 
-# --- stage 2: deterministic tests (183) ---
-run_gate "swift test (183)" swift test --disable-sandbox
+# --- stage 2: deterministic tests (186) ---
+run_gate "swift test (186)" swift test --disable-sandbox
 
 # --- stage 3: live-path verify harnesses ---
 # These drive the RELEASE binary over UDS. Each harness starts/stops its own binary
@@ -69,6 +70,7 @@ HARD_HARNESSES=(
     "scripts/evaluate_smoke.py"
     "scripts/cdp_dom_smoke.py"
     "scripts/cdp_event_smoke.py"
+    "scripts/metrics_smoke.py"
     "scripts/longrun_leak.py"
     "scripts/uma_coexist.py"
 )
@@ -95,7 +97,7 @@ if [[ "$SKIP_PERF" -eq 0 ]]; then
 fi
 
 # --- cleanup shared leftovers (Rule: clean process data) ---
-rm -f /tmp/fusion-browser-smoke.sock /tmp/fusion-browser-verify.sock 2>/dev/null || true
+rm -f /tmp/fusion-browser-smoke.sock /tmp/fusion-browser-verify.sock /tmp/fusion-browser-metrics.sock 2>/dev/null || true
 
 echo ""
 if [[ "$GATE_FAIL" -eq 0 ]]; then
