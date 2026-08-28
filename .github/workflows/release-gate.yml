@@ -75,8 +75,16 @@ jobs:
       - name: Ensure fusion-mlx reachable (uma_coexist precondition)
         if: env.SKIP_UMA != '1'
         run: |
-          curl -sf http://localhost:11434/v1/models >/dev/null 2>&1 \
-            || { echo "::warning::fusion-mlx not reachable on :11434; set SKIP_UMA=1 or start it"; exit 1; }
+          # fusion-mlx /v1/models is Bearer-gated; -sf exits non-zero on a 401/5xx.
+          # FUSION_MLX_API_KEY is the admin key (set as a repo secret). A missing
+          # key or unreachable engine makes uma_coexist impossible -> fail fast.
+          if [[ -z "$FUSION_MLX_API_KEY" ]]; then
+            echo "::warning::FUSION_MLX_API_KEY secret not set; set it or SKIP_UMA=1"
+            exit 1
+          fi
+          curl -sf -H "Authorization: Bearer $FUSION_MLX_API_KEY" \
+            http://localhost:11434/v1/models >/dev/null 2>&1 \
+            || { echo "::warning::fusion-mlx not reachable on :11434 (or key rejected); set SKIP_UMA=1 or start it"; exit 1; }
 
       - name: Run release gate (build + 198 tests + 9 live harnesses)
         run: |
