@@ -4,7 +4,10 @@ import AppKit
 
 // FR-06: WKWebView wrapper. Headless via offscreen window; Headed via visible window.
 // FR-04: nonPersistent dataStore per session (in-memory only).
-// FR-08: shared WKProcessPool limits WebContent process count.
+// FR-08: WebContent process count is bounded by the session cap (FBResourceQuota.maxSessions,
+// enforced in SessionManager) + WebKit's built-in per-site process isolation. The old
+// shared WKProcessPool was a no-op on macOS 12+ (deprecated: "multiple instances no
+// longer has any effect") and was removed — it never enforced a process cap (B-2).
 
 public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     public let mode: WebMode
@@ -12,8 +15,6 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var webView: WKWebView?
     private var hostWindow: NSWindow?
     private let log = FBLogger.shared
-    // Shared pool to cap WebContent process count (FR-08).
-    static let sharedPool = WKProcessPool()
     // L-7: JS eval pipeline wedge flag. WKWebView serializes JS eval on the main thread;
     // an adversarial/buggy page script (while(true){}) wedges the queue so every subsequent
     // evaluateJSSync times out with no way to cancel the in-flight eval. Set on timeout,
@@ -55,8 +56,9 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         let config = WKWebViewConfiguration()
         // FR-04: in-memory session, nonPersistent dataStore per session.
         config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
-        // FR-08: share process pool across sessions.
-        config.processPool = FBWebView.sharedPool
+        // FR-08: no explicit processPool — WKProcessPool is deprecated (macOS 12+, no-op).
+        // WebKit manages WebContent processes internally with per-site isolation; the
+        // live process count is bounded by the session cap (FBResourceQuota.maxSessions).
         config.preferences.javaScriptEnabled = true
 
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 800), configuration: config)

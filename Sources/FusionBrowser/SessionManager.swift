@@ -2,7 +2,9 @@ import Foundation
 
 // FR-04 / FR-08: session lifecycle + resource quota enforcement.
 // FR-04: close() clears THIS session's nonPersistent dataStore, not global default.
-// FR-08: max sessions, per-session memory budget, shared WKProcessPool.
+// FR-08: max sessions + per-session memory budget. WebContent process count is bounded
+// by the session cap (quota.maxSessions) + WebKit per-site isolation, not a shared pool
+// (WKProcessPool deprecated macOS 12+, removed — B-2).
 
 public final class FBSession {
     public let id: String
@@ -144,8 +146,6 @@ public final class FBSessionManager {
     // collects idle ids, then closes each OUTSIDE the lock (close does a main-hop).
     private var reaperTimer: DispatchSourceTimer?
     private let reaperConfig: FBSessionReaperConfig
-    // Shared WKProcessPool limits WebContent process count (FR-08).
-    public static let sharedProcessPoolIdentifier = "com.fusion.browser.processpool"
 
     public init(quota: FBResourceQuota, guards: FBSchedulingGuards, watchdog: FBWatchdogPolicy,
                 creds: FBCredentialManager, auth: FBAuth, allowedOrigins: [String],

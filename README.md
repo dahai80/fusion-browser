@@ -56,7 +56,7 @@ fired) + Flow B fill (`getDocument` → `querySelector('#u')` → `focus` →
 green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 
 **Phase 1 landed**
-- Swift 6 SPM package, Headless/Headed WKWebView wrapper (`nonPersistent` dataStore isolation, shared `WKProcessPool`)
+- Swift 6 SPM package, Headless/Headed WKWebView wrapper (`nonPersistent` dataStore isolation; WebContent process count bounded by the session cap + WebKit per-site isolation, not a shared pool — `WKProcessPool` deprecated macOS 12+, removed per B-2)
 - UDS server (POSIX socket + `DispatchSourceRead`, bypassing the unreliable `NWListener` AF_UNIX accept)
 - Length-prefixed JSON framing (schema-aligned, snake_case; codec swappable to gRPC later)
 - FR-08 resource control: dynamic session count / memory budget by physical RAM, over-quota rejected

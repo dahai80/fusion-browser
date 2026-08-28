@@ -8,12 +8,14 @@ public struct FBResourceQuota: Codable, Equatable {
     public var maxMemoryPerSessionMB: Int
     public var maxTotalMemoryMB: Int
     // H-2: the old `maxWebContentProcesses` field was a DEAD field — declared, set to
-    // maxSessions, and read nowhere (grep confirmed). WKWebView's WebContent process count
-    // is governed by the shared WKProcessPool (WebView.sharedPool), NOT by any config knob;
-    // the field only made FR-08's "WebContent process cap" look implemented while providing
-    // zero enforcement (operators set it to 4, got 10 processes). Removed: no config key
-    // lies about an unenforced limit. The shared pool (one WebContent process family per
-    // engine) IS the real limiter; a session cap of maxSessions bounds the live pages.
+    // maxSessions, and read nowhere (grep confirmed). It only made FR-08's "WebContent
+    // process cap" look implemented while providing zero enforcement (operators set it to
+    // 4, got 10 processes). Removed: no config key lies about an unenforced limit.
+    // B-2: the live WebContent process count is bounded by the session cap (maxSessions,
+    // enforced in SessionManager) + WebKit's built-in per-site process isolation. The old
+    // shared WKProcessPool was deprecated (macOS 12+, no-op) and never enforced a cap;
+    // it was removed. FBMemoryWatchdog.totalRSSBytes samples host+WebContent RSS as the
+    // real memory backstop (P4-2, default off — enable for production).
 
     public init(maxSessions: Int, maxMemoryPerSessionMB: Int, maxTotalMemoryMB: Int) {
         self.maxSessions = maxSessions

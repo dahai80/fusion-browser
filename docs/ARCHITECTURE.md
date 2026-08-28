@@ -150,6 +150,14 @@ is the fusion-mlx registered ID using `--` separators, not HF `/`.
 - **FR-04 non-persistence** — `nonPersistent` dataStore isolates each session;
   verified zero on-disk residue (P4-1: lsof + container check, no WebsiteData /
   cookies / localStorage / IndexedDB held).
+- **B-2 process-cap mechanism** — WebContent process count is bounded by the
+  session cap (`quota.maxSessions`, enforced in `SessionManager.create`) + WebKit's
+  built-in per-site process isolation, NOT a shared process pool. `WKProcessPool`
+  was deprecated in macOS 12.0 ("creating and using multiple instances no longer
+  has any effect") — the old `sharedPool` + `config.processPool` assignment was a
+  no-op that never enforced a cap and was removed. The dead `maxWebContentProcesses`
+  config field (set but read nowhere) was removed in H-2. `FBMemoryWatchdog` is the
+  real memory backstop (host+WebContent RSS).
 - **P4-2 RSS watchdog** — `FBMemoryWatchdog` samples host RSS
   (`mach_task_basic_info.resident_size`, host process — excludes separate
   WebContent procs bounded by FR-08). One-shot breach fires `onBreach` once,

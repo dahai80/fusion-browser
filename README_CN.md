@@ -13,7 +13,7 @@ macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与
 Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，99 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
 
 **Phase 1 已落地**
-- Swift 6 SPM 包，Headless/Headed WKWebView 封装（`nonPersistent` dataStore 隔离，共享 `WKProcessPool`）
+- Swift 6 SPM 包，Headless/Headed WKWebView 封装（`nonPersistent` dataStore 隔离；WebContent 进程数由 session 上限 + WebKit 站点级隔离约束，非共享进程池——`WKProcessPool` macOS 12+ 已弃用，按 B-2 移除）
 - UDS 服务端（POSIX socket + `DispatchSourceRead`，绕开 `NWListener` AF_UNIX accept 不可靠问题）
 - 长度前缀 JSON 分帧（schema 对齐，snake_case，codec 可后续替换为 gRPC）
 - FR-08 资源管控：按物理 RAM 动态核定 session 数/内存预算，超配额拒绝
