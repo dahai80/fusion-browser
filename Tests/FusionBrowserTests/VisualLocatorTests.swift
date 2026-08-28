@@ -46,13 +46,40 @@ final class VisualLocatorTests: XCTestCase {
         XCTAssertEqual(r?.y, 150)
     }
 
-    // VLMs often wrap JSON in prose/code fences; parser must tolerate it.
-    func testParsesJSONInProseAndCodeFence() {
-        let client = FakeHTTPClient(assistantText: "Here is the coordinate:\n```json\n{\"x\": 42, \"y\": 88}\n```\nDone.")
+    // L-18: a bare ```json fence (no surrounding prose) is the ONLY wrapping tolerated.
+    func testParsesBareCodeFence() {
+        let client = FakeHTTPClient(assistantText: "```json\n{\"x\": 42, \"y\": 88}\n```")
         let loc = FBVisualLocator(config: enabledConfig(), client: client)
         let r = loc.predict(screenshot: Data([0x89]), description: "search box", viewportSize: (1280, 800))
         XCTAssertEqual(r?.x, 42)
         XCTAssertEqual(r?.y, 88)
+    }
+
+    // L-18: prose-wrapped JSON is REJECTED. "can't help, example: {\"x\":0,\"y\":0}"
+    // used to be accepted by the firstIndex-of-{ parser and yield garbage in-bounds coords.
+    func testProseWrappedJSONRejected() {
+        let client = FakeHTTPClient(assistantText: "Here is the coordinate:\n```json\n{\"x\": 42, \"y\": 88}\n```\nDone.")
+        let loc = FBVisualLocator(config: enabledConfig(), client: client)
+        let r = loc.predict(screenshot: Data([0x89]), description: "search box", viewportSize: (1280, 800))
+        XCTAssertNil(r, "prose-wrapped JSON must be rejected (L-18)")
+    }
+
+    // L-18: a hallucinated coord object with only one key must NOT coerce the missing key
+    // to 0 (which would fabricate a top-left click). Both x and y must be present + numeric.
+    func testMissingKeyRejected() {
+        let client = FakeHTTPClient(assistantText: "{\"x\": 50}")
+        let loc = FBVisualLocator(config: enabledConfig(), client: client)
+        let r = loc.predict(screenshot: Data([0x89]), description: "x", viewportSize: (1280, 800))
+        XCTAssertNil(r, "missing y must be rejected, not coerced to 0")
+    }
+
+    // L-5: NaN / Infinity would fail every ordering check and slip the OOB guard; must be
+    // rejected explicitly so they never interpolate into elementFromPoint(NaN,NaN).
+    func testNonFiniteCoordsRejected() {
+        let client = FakeHTTPClient(assistantText: "{\"x\": NaN, \"y\": 50}")
+        let loc = FBVisualLocator(config: enabledConfig(), client: client)
+        let r = loc.predict(screenshot: Data([0x89]), description: "x", viewportSize: (1280, 800))
+        XCTAssertNil(r, "NaN coords must be rejected (L-5)")
     }
 
     // Integer coords from JSON are coerced to Double.
