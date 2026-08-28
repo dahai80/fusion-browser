@@ -190,7 +190,8 @@ The six infra modules (each a single file, see README source map):
   NOTE: cowork's CDP client omits the Origin header and ships an empty allowlist
   by default, so under strict E-15 its WS upgrade + remote navigate are DENIED —
   cowork must send an allowlisted Origin + configure `allowedOrigins` to use CDP.
-  This is a deliberate cross-project contract change (issue → PR in fusion-cowork).
+  This is a deliberate cross-project contract change (issue fusion-cowork#77 → PR in
+  fusion-cowork).
 - **CDP events are decoupled into `FBCDPEventEmitter`** (T3.3). Event emission
   was originally inline in `FBCDPConnection` tied to the live socket + webview;
   that made it untestable (Page.navigate triggers live WKWebView → `swift test`

@@ -378,7 +378,7 @@ final class FBCDPConnection {
         // empty allowlist AND on a missing/opaque origin, so a bare delegation is the
         // strict fail-closed gate: a client MUST send an allowlisted Origin to upgrade.
         // (cowork's CDP client omits Origin — it breaks here by design; tracked upstream
-        // via the E-15 issue. The UDS path is unaffected.)
+        // via fusion-cowork#77. The UDS path is unaffected.)
         let wsOrigin = extractHeader(header, name: "origin") ?? ""
         guard server?.isOriginAllowed(wsOrigin) ?? false else {
             log.warn("CDP", "WS upgrade origin rejected origin=\(wsOrigin.isEmpty ? "<empty>" : wsOrigin) fd=\(fd)")
