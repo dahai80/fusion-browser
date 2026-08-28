@@ -19,9 +19,41 @@ anti-injection sanitizer / CDP compat layer / credential closure) + Phase 3 thre
 tasks (multi-node dynamic quota / CDP domain extension + events / visual-grounding
 fallback) + Phase 4 five tasks (non-persistence verification / RSS self-restart /
 perf benchmark suite / UMA coexistence baseline / 1000-action long-run no-leak)
-complete. Build green, 90 unit tests pass. CDP `:9222` end-to-end smoke pass;
+complete. Build green, 189 unit tests pass. CDP `:9222` end-to-end smoke pass;
 T3.4 visual grounding verified via real VLM smoke; Phase 4 all verified via the
-release binary + Python verify scripts.
+release binary + Python verify scripts. Post-audit hardening wave (P0→P1):
+H-1 per-session node-map isolation, R-1 navigate-didFinish, E-7 UDS screenshot,
+R-7 release gate, R-10 controlled-input setter, R-5 session reaper, E-36 cookie
+inject off queue, R-15 timeout log scrub, H-2 WebContent resource monitor,
+H-8 fair main-thread rate limiter, E-21/E-22 session-lifecycle lock + close
+barrier, H-5 capability-model enforcement (driver takes token caps; CDP
+verifyBearer surfaces caps + per-method gate), E-15 origin-gate fail-closed
+(WS upgrade + CDP navigate + PUT /json/new now deny on empty Origin / empty
+allowlist, consistent with EVALUATE; local schemes still allowed), E-23
+rebuildDepth counts only real replays (handleCrash checks isIdempotent first;
+non-idempotent crashes no longer consume the depth cap, so two slow-page click
+timeouts no longer brick the session) landed; R-7 gate green end-to-end.
+Post-audit hardening wave P2 (in progress): E-9 `Runtime.evaluate` returns the
+real JS result (not a synthetic `"ok"`) — `evaluateJSSync` return value is
+JSON-encoded (`.fragmentsAllowed`) into `BrowserStateResponse.evaluateResult`,
+CDP `cdpRemoteObject` maps it to `{type,value}`; the default token lacks the
+`evaluate` cap (H-5 scoped-token model), so the new `tokenCapabilities` config
+key elevates it (e.g. `["evaluate"]` or `["all"]`; unknown names dropped
+fail-closed); E-9 live smoke pins 6 JS types + void round-trip. E-8 CDP DOM
+domain: the 5 `DOM.*` methods (`getDocument` / `querySelector` / `resolveNode`
+/ `getBoxModel` / `focus`) now deref real live elements via a per-connection
+identity registry on `FBCDPTranslator` (`intToIdStr` / `objectIdToIdStr` /
+`idStrToSelector`) bridging CDP handles to the walker's `window.__fbMap` — the
+old stubs (hardcoded 1280×800 `getBoxModel`, FNV-hash `querySelector`, never-set
+`[data-fb-id]` focus, 1-node `getDocument`, unregistered `fb-node-N`
+`resolveNode`) are gone; `querySelector` mints `qN` ids with a stored-selector
+re-query fallback (the walker rebuilds `__fbMap` fresh each extract, dropping
+`qN` entries); E-8 live smoke (`scripts/cdp_dom_smoke.py`) drives both cowork
+flows over the CDP WS surface — Flow A click (`getFullAXTree` → `resolveNode` →
+`focus` + `getBoxModel` → real rect centroid → `dispatchMouseEvent` → onclick
+fired) + Flow B fill (`getDocument` → `querySelector('#u')` → `focus` →
+`insertText('hello')` → `Runtime.evaluate` value == `'hello'`). R-7 gate
+green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 
 **Phase 1 landed**
 - Swift 6 SPM package, Headless/Headed WKWebView wrapper (`nonPersistent` dataStore isolation, shared `WKProcessPool`)
@@ -56,21 +88,23 @@ release binary + Python verify scripts.
 **Post-Phase-4 fix landed**
 - Node-id format (commit `9b3405e`, 2026-08-27): wire/structured node ids are BARE `eN` (`interactive_nodes[].node_id`, `target_node_id`); the markdown reduction `ax_tree_markdown` shows `[@eN]` for LLM readability only. An LLM forwarding `@e1` verbatim hit a `__fbMap` miss → `node_stale`. `FBActionDriver.execute` now strips a leading `@` from `target_node_id` once before admit/resolve/JS, so both `e1` and `@e1` resolve. Callers SHOULD send bare `eN`. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4.
 
+**Rust core removed (E-17~20 / #68, 2026-08-27)**
+- PRD §2 T1.4 evaluation: pure Swift (`FBAXTreeReducer.toMarkdown` + `JSONDecoder`) covers Sanitizer+AXTree — the Rust core was default OFF and never the live path (the pure-Swift path was the fallback the Rust core degraded to). Removed the entire FFI boundary: `FBCoreBridge` / `FBCoreWorkerPool` / `FBCoreRust` SPM target / `FBCoreRustBuilder` plugin / `rust/` crate tree / `useRustCore` config key / `RustCoreParityTests` / `scripts/parity_smoke.py`. Closes audit E-17 (build not portable: hardcoded arm64), E-18 (worker pool not dedicated FIFO), E-19 (no runtime parity check), E-20 (Cargo.lock not in plugin inputs) at once. No Rust toolchain needed; `--disable-sandbox` no longer required (was mandatory only because the plugin ran cargo). Wire schema + AXTree output (markdown + nodes + audit) unchanged → cowork unaffected.
+
 **Not done (per roadmap)**
-- Rust core engine (T1.4 assessment: pure Swift may suffice; decide in Phase 3 based on post-render visibility-analysis CPU load)
 - T3.1 agent-studio full integration: cross-project, this side ships the contract doc + issue only, code lands in fusion-agent-studio (now landed upstream via PR #235; my tracking issue #237 closed as duplicate; #241 open for test-fidelity)
 
 ## Build / Test
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
-swift build                # debug
+swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test                 # 90 tests
-swift test --filter CDPServerTests   # single test class
+swift test --disable-sandbox   # 183 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 
-Requires: macOS 14+, Xcode CLI Tools (verified Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64).
+Requires: macOS 14+, Xcode CLI Tools (verified Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64). Pure Swift build — no Rust toolchain needed (Rust core removed, E-17~20 / #68).
 
 > Note: WKWebView completion handlers depend on the main run loop; `swift test` has no main loop → `evaluateJSSync`/`screenshotSync` semaphores deadlock. So live WKWebView behavior (real AX walker, screenshot, real navigation) is NOT verified inside `swift test`; covered by deterministic unit tests (rule catalog/reducer/translator/codec) + the built binary + Python smoke client. See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §4.
 
@@ -90,7 +124,7 @@ JSON
 
 `logLevel`: debug/info/warn/error. Logs go to both `os_log` (Console.app, search `com.fusion.browser`) and stderr.
 
-Config keys: `socketPath`, `cdpEnabled`, `cdpPort`, `authToken`, `logLevel`, `allowedOrigins` (EVALUATE origin whitelist, empty=no limit), `visualLocator` (T3.4 visual-grounding fallback, default off; enabling needs a VLM loaded in fusion-mlx first; sub-keys `endpoint`/`model`/`timeoutMs`/`enabled`), `memoryWatchdog` (P4-2 RSS self-restart, default off; sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`, action=`close_sessions`|`exit`), `guards` (FR-13 scheduling guards, sub-keys `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`).
+Config keys: `socketPath`, `cdpEnabled`, `cdpPort`, `authToken`, `logLevel`, `allowedOrigins` (origin whitelist — empty is FAIL-CLOSED per E-15: EVALUATE, CDP navigate, and the CDP WS upgrade all deny on an empty list; local schemes data:/about:/blob: still navigate freely), `visualLocator` (T3.4 visual-grounding fallback, default off; enabling needs a VLM loaded in fusion-mlx first; sub-keys `endpoint`/`model`/`timeoutMs`/`enabled`), `memoryWatchdog` (P4-2 RSS self-restart, default off; sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`, action=`close_sessions`|`exit`), `guards` (FR-13 scheduling guards, sub-keys `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`). A leftover `useRustCore` key in an existing `~/.fusion-browser/config.json` is silently ignored (Codable drops unknown keys) — the Rust core was removed in E-17~20 / #68.
 
 P4-2 RSS self-restart enable example:
 ```json
@@ -105,6 +139,7 @@ P4-2 RSS self-restart enable example:
 | `scripts/perf_bench.py` | P4-3 perf benchmark (scroll/screenshot/click latency + AXTree compression ratio) | `scripts/perf-report.json` |
 | `scripts/uma_coexist.py` | P4-4 UMA coexistence (10 sessions×100 actions + mlx inference concurrent) | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action long-run no-leak (RSS quartile comparison) | `scripts/longrun-report.json` |
+| `scripts/navigate_execute_smoke.py` | navigate-via-execute SIGTRAP fix (execute navigate off-main → engine stays alive, page loads) | terminal PASS/FAIL |
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 
@@ -138,7 +173,10 @@ NOT real Chrome — a shim translating cowork `cdp_client.py`'s real CDP transpo
 - WS upgrade: `ws://127.0.0.1:<port>/devtools/page/<targetId>`, no subprotocol, no auth header, frames ≤10MiB
 - WS messages: `{id,method,params}` → `{id,result}` (caller reads nested: `Runtime.evaluate`→`result.result.value`, `Accessibility.getFullAXTree`→`result.nodes` (each with `backendNodeId`), `Page.captureScreenshot`→`result.data` (base64 PNG), `Page.navigate`→`result.frameId`, `DOM.getDocument`→`result.root.nodeId`, `DOM.querySelector`→`result.nodeId`, `DOM.resolveNode`→`result.object.objectId`)
 - Supported domains: Page (navigate/captureScreenshot/handleJavaScriptDialog + frameNavigated/lifecycleEvent), Runtime (evaluate, non-whitelisted origin rejected + consoleAPICalled), Accessibility (getFullAXTree), Input (dispatchMouseEvent click elementFromPoint / dispatchKeyEvent Enter submit / insertText), Network (requestWillBeSent/responseReceived/loadingFinished), DOM (getDocument/querySelector/resolveNode/focus/setFileInputFiles), Emulation (no-op placeholder); Performance/HeapProfiler/Tracing are no-op or minimal. Events carry NO `id` (per spec); cowork `_dispatch_event` buffers Network.*/Runtime.consoleAPICalled
-- Auth: the CDP layer does NOT token-gate (cowork `Authorization: Bearer` is optional on `/json` only); security is the EVALUATE origin whitelist + UDS token on the main path
+- CDP event honesty (E-11): nav events fire in real-Chrome order (`Network.requestWillBeSent → responseReceived → loadingFinished` then `Page.frameNavigated → DOMContentLoaded → load`); `loaderId`/`requestId` are per-nav (`fb-loader-<seq>`/`fb-req-<seq>`), `frameId` constant per frame; `Network.responseReceived` reports the REAL main-document HTTP status captured via `WKNavigationDelegate.decidePolicyFor` (status 0 when none, e.g. local schemes — was hardcoded 200); `Runtime.consoleAPICalled` is wired — `FBCDPConnection.drainConsoleEvents` reads `window.__fbConsole` (the console shim buffer) and emits after navigate + evaluate (was dead code). Events arrive in one synchronous burst after load completion (shim cannot stream during load; cowork buffers raw). Subresource responses stay unknown (WKWebView hides them). Live-pinned by `scripts/cdp_event_smoke.py`.
+- Auth (H-5/E-15): the CDP layer IS Bearer-gated — `GET /json` + WS upgrade require `Authorization: Bearer <token>` (fail-closed). WS upgrade + CDP `Page.navigate` + `PUT /json/new` are also origin-gated fail-closed: deny on empty Origin OR empty `allowedOrigins` (consistent with EVALUATE); local schemes `data:`/`about:` still navigate. Default off (`cdpEnabled`).
+- `backendNodeId` stability (E-13): it is a document-order position (1-based Nth interactive node), stable only for static pages — SPA reorders shift it. Callers MUST re-fetch `getFullAXTree` before acting on a reordered page; cross-extract handle reuse is unsupported. `resolveNode` re-extracts + re-registers before minting an objectId, so a stale `backendNodeId` derefs the CURRENT Nth node (honest) or fail-closes (`node stale`) if the tree shrank. Full contract in CLAUDE.md.
+- `backendNodeId` stability (E-13): it is a document-order position (1-based Nth interactive node), stable only for static pages — SPA reorders shift it. Callers MUST re-fetch `getFullAXTree` before acting on a reordered page; cross-extract handle reuse is unsupported. `resolveNode` re-extracts + re-registers before minting an objectId, so a stale `backendNodeId` derefs the CURRENT Nth node (honest) or fail-closes (`node stale`) if the tree shrank. Full contract in CLAUDE.md.
 
 ## Source Structure
 
@@ -164,9 +202,12 @@ NOT real Chrome — a shim translating cowork `cdp_client.py`'s real CDP transpo
 | `CDPServer.swift` | T2.3/T3.3 CDP-WS shim: POSIX TCP + HTTP discovery + WS upgrade + frame codec + `FBCDPTranslator` (CDP method→ActionDriver, extended Network/Console/Emulation/Page.lifecycleEvent/DOM) + `FBCDPEventEmitter` (events decoupled, deterministic unit-testable) |
 | `VisualLocator.swift` | T3.4 visual-grounding fallback: screenshot→fusion-mlx VLM `/v1/chat/completions` predicts `{x,y}` + OOB guards; pluggable `FBHTTPClient` |
 
+> Removed in E-17~20 / #68: `FBCoreBridge.swift`, `FBCoreWorkerPool.swift`, `Sources/FBCoreRust/`, `Plugins/FBCoreRustBuilder/`, `rust/fb-core/` — the Rust core path. The AXTree compile now runs pure Swift (`FBAXTreeReducer.toMarkdown` + `JSONDecoder`) in `AXTree.swift`'s `FBAXTreeExtractor.extract`, the path the Rust core always degraded to.
+
 ## Roadmap (see PRD §4)
 
 - Phase 1 (base): engine base + six infra modules + action passthrough + tiered watchdog ✓
 - Phase 2: AXTree extractor + anti-injection sanitizer + CDP compat layer (4 domains) + credential closure ✓
 - Phase 3: multi-node adaptation (T3.2) + CDP domain extension + events (T3.3) + visual-grounding fallback (T3.4) ✓; agent-studio full integration (T3.1) cross-project, landed upstream
-- Phase 4 (this landing, production-hardening): non-persistence verification (P4-1, FR-04) + RSS self-restart (P4-2) + perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action long-run no-leak (P4-5) ✓
+- Phase 4 (production-hardening): non-persistence verification (P4-1, FR-04) + RSS self-restart (P4-2) + perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action long-run no-leak (P4-5) ✓
+- Rust core engine (PRD §4.3 module 5, T1.4): was flag-gated `fb_core` staticlib + C-ABI FFI; **REMOVED in E-17~20 / #68** — PRD §2 T1.4 evaluation concluded pure Swift covers Sanitizer+AXTree (the Rust path was default OFF, the pure-Swift reducer was the fallback). Audit E-17~20 (build not portable / worker pool not FIFO / no runtime parity check / Cargo.lock not in plugin inputs) all closed by removal. Default-OFF pure-Swift path is now the only path ✓

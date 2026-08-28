@@ -1,22 +1,29 @@
 # Development Guide
 
 > fusion-browser — contributor conventions and hard constraints.
-> Doc version: Phase 4 (2026-08-27).
+> Doc version: Phase 4 (2026-08-27); Rust core removed E-17~20 (#68).
 
 ## 1. Build / Test / Run
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
-swift build -c release          # binary -> .build/release/fusion-browser
-swift test                      # full suite (deterministic unit tests only)
-swift test --filter CDPServerTests   # single test class
-swift test --filter AXTreeTests/StableMappingTests   # single test method
+swift build -c release          # binary -> .build/release/fusion-browser (pure Swift, no plugin)
+swift test --disable-sandbox    # full suite, 183 tests (--disable-sandbox no longer required:
+                                #  plugin gone; kept for compatibility)
+swift test --disable-sandbox --filter CDPServerTests   # single test class
+swift test --disable-sandbox --filter AXTreeTests/StableMappingTests   # single method
 .build/release/fusion-browser   # run engine (UDS server, CDP off by default)
 ```
 
-No venv / Python needed for build (pure Swift). Python `scripts/` are verify
-harnesses (smoke_client, perf_bench, uma_coexist, longrun_leak,
-verify_nonpersistent), NOT part of the build.
+No venv / Python needed for build (pure Swift). E-17~20 (#68): the Rust core
+was removed — PRD §2 T1.4 evaluation concluded pure Swift covers Sanitizer+
+AXTree, so the `FBCoreRustBuilder` plugin, `FBCoreRust` target, `rust/` tree,
+and `useRustCore` config key were deleted (the staticlib was default OFF and
+never the live path). No Rust toolchain needed; `--disable-sandbox` was
+mandatory only because the plugin ran `cargo` and is no longer required (kept on
+the gate lines for compatibility). Python `scripts/` are verify harnesses
+(smoke_client, perf_bench, uma_coexist, longrun_leak, verify_nonpersistent), NOT
+part of the build.
 
 ## 2. Coding Conventions
 
@@ -64,6 +71,16 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
   `replacingOccurrences(of: "__ARG__", with:)` (replaces ALL occurrences per arg):
   with multi-arg scripts the first arg fills every placeholder and starves the
   rest, so the fingerprint never matches → EVERY click/type returns `node_stale`.
+- **Rust core removed (E-17~20 / #68).** PRD §2 T1.4 evaluation concluded pure
+  Swift covers Sanitizer+AXTree, so the entire Rust FFI boundary was deleted:
+  `FBCoreBridge` / `FBCoreWorkerPool` / `FBCoreRust` target / `FBCoreRustBuilder`
+  plugin / `rust/` tree / `useRustCore` config key / `RustCoreParityTests` /
+  `scripts/parity_smoke.py`. The `FBAXTreeExtractor.extract` seam is now pure
+  Swift (`mapping.install` → `FBAXTreeReducer.toMarkdown` → `SecurityAuditResult`),
+  the path the Rust core always degraded to on failure. No Rust toolchain needed;
+  `--disable-sandbox` was mandatory only because the plugin ran `cargo` and is no
+  longer required. Wire schema + AXTree output unchanged. See
+  `docs/ARCHITECTURE.md` §8.
 
 ## 4. Testing Boundaries
 
@@ -80,6 +97,13 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
   `uma_coexist.py`, `longrun_leak.py`) run against the release binary and write
   `scripts/*-report.json` (gitignored). Run them for integration verification;
   clean up process data after, keep only final outputs + logs.
+- **Rust core parity gate — removed (E-17~20 / #68).** The deleted
+  `RustCoreParityTests` + `scripts/parity_smoke.py` compared Rust output vs the
+  Swift reducer; with Rust gone there are no Rust bytes to drift. The Swift
+  reducer's own correctness is covered by the existing `AXTreeTests` /
+  `StableMappingTests` (markdown shape, `[@eN]` prefix, sorted `hiddenFlags`
+  keys + optional `render:hidden`, masked password, purged hidden nodes) — those
+  stay and are the real correctness gate.
 - **Test fidelity matters.** A mock that emits a shape the real engine never
   produces gives false confidence. Mocks MUST match the real wire schema (e.g.
   bare `eN` node ids, not `@eN`) — see `docs/PROTOCOL.md` §4.
@@ -145,7 +169,8 @@ A new action touches several points — keep them in sync:
 - **`architecture/agent-studio-integration-contract-0826.md`** is the consumer
   contract — update it when the wire schema or action contract changes.
 - **Keep the test count and landed fixes current** in `README.md` /
-  `README_CN.md` (e.g. node-id bare `eN` fix, test count). Stale numbers erode
-  trust faster than no number.
+  `README_CN.md` (e.g. node-id bare `eN` fix, E-17~20 Rust removal, test count).
+  The suite is 183 tests (Rust-core parity + worker-pool tests removed in
+  E-17~20 / #68); stale numbers erode trust faster than no number.
 - **Clean up process data after verification** — keep only final outputs + logs.
   `scripts/*-report.json` is gitignored; do not commit transient run artifacts.

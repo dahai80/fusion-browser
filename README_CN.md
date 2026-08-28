@@ -10,7 +10,7 @@ macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与
 
 ## 当前状态（Phase 4 生产化加固已落地）
 
-Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，90 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
+Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，99 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
 
 **Phase 1 已落地**
 - Swift 6 SPM 包，Headless/Headed WKWebView 封装（`nonPersistent` dataStore 隔离，共享 `WKProcessPool`）
@@ -45,21 +45,23 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 **Phase-4 后修复已落地**
 - 节点 id 格式（commit `9b3405e`，2026-08-27）：wire/结构化节点 id 为裸 `eN`（`interactive_nodes[].node_id`、`target_node_id`）；Markdown 降维 `ax_tree_markdown` 显示 `[@eN]` 仅供 LLM 可读。LLM 原样转发 `@e1` 会 `__fbMap` 未命中 → `node_stale`。`FBActionDriver.execute` 现在在 admit/resolve/JS 前一次性剥离 `target_node_id` 前导 `@`，故 `e1` 与 `@e1` 均可解析。调用方应发裸 `eN`。见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4。
 
+**Rust 核心已移除（E-17~20 / #68，2026-08-27）**
+- PRD §2 T1.4 评估结论：纯 Swift（`FBAXTreeReducer.toMarkdown` + `JSONDecoder`）已覆盖 Sanitizer+AXTree——Rust 核心默认关、从未是活路径（纯 Swift 路径正是 Rust 核心失败时回退的那条）。已移除整个 FFI 边界：`FBCoreBridge` / `FBCoreWorkerPool` / `FBCoreRust` SPM target / `FBCoreRustBuilder` 插件 / `rust/` crate 树 / `useRustCore` 配置键 / `RustCoreParityTests` / `scripts/parity_smoke.py`。一次性关闭审计 E-17（构建不可移植：arm64 硬编码）、E-18（worker pool 非专用 FIFO）、E-19（无运行时对齐检查）、E-20（Cargo.lock 未进插件输入）。无需 Rust 工具链；`--disable-sandbox` 不再必须（此前必须仅因插件跑 cargo）。wire schema + AXTree 输出（markdown + 节点 + audit）不变 → cowork 不受影响。
+
 **未做（按路线图）**
-- Rust 核心引擎（T1.4 评估：纯 Swift 可能足够，Phase 3 视渲染后可见性分析 CPU 负载决定）
 - T3.1 agent-studio 全对接：跨项目，本侧只出契约文档 + issue，落地在 fusion-agent-studio（已上游经 PR #235 落地；我的跟踪 issue #237 关为重复；#241 开，测试保真度）
 
 ## 构建与测试
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
-swift build                # debug
+swift build                # debug（纯 Swift，无插件）
 swift build -c release     # release -> .build/release/fusion-browser
-swift test                 # 90 tests
-swift test --filter CDPServerTests   # 单个测试套
+swift test --disable-sandbox   # 183 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
+swift test --disable-sandbox --filter CDPServerTests   # 单个测试套
 ```
 
-要求：macOS 14+，Xcode CLI Tools（已验证 Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64）。
+要求：macOS 14+，Xcode CLI Tools（已验证 Swift 6.3.3 / Xcode 26.6 / macOS 26.5 / arm64）。纯 Swift 构建——无需 Rust 工具链（Rust 核心已移除，E-17~20 / #68）。
 
 > 注：WKWebView 完成回调依赖主 run loop，`swift test` 无主循环 → `evaluateJSSync`/`screenshotSync` 信号量会死锁。故 live WKWebView 行为（AX walker 实跑、截图、真实导航）不在 `swift test` 内验证，靠确定性单元测试（规则目录/reducer/translator/codec）+ 起二进制 + Python smoke 客户端覆盖。见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §4。
 
@@ -79,7 +81,7 @@ JSON
 
 `logLevel`：debug/info/warn/error。日志同时写 `os_log`（Console.app 可查 `com.fusion.browser`）与 stderr。
 
-配置键：`socketPath`、`cdpEnabled`、`cdpPort`、`authToken`、`logLevel`、`allowedOrigins`（EVALUATE origin 白名单，空=不限）、`visualLocator`（T3.4 视觉定位兜底，默认关；启用需先在 fusion-mlx 加载 VLM，子键 `endpoint`/`model`/`timeoutMs`/`enabled`）、`memoryWatchdog`（P4-2 RSS 自重启，默认关；子键 `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`，action=`close_sessions`|`exit`）、`guards`（FR-13 调度护栏，子键 `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`）。
+配置键：`socketPath`、`cdpEnabled`、`cdpPort`、`authToken`、`logLevel`、`allowedOrigins`（EVALUATE origin 白名单，空=不限）、`visualLocator`（T3.4 视觉定位兜底，默认关；启用需先在 fusion-mlx 加载 VLM，子键 `endpoint`/`model`/`timeoutMs`/`enabled`）、`memoryWatchdog`（P4-2 RSS 自重启，默认关；子键 `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`，action=`close_sessions`|`exit`）、`guards`（FR-13 调度护栏，子键 `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`）。遗留的 `useRustCore` 键在现有 `~/.fusion-browser/config.json` 中会被静默忽略（Codable 丢弃未知键）——Rust 核心已在 E-17~20 / #68 移除。
 
 P4-2 RSS 自重启启用示例：
 ```json
@@ -94,6 +96,7 @@ P4-2 RSS 自重启启用示例：
 | `scripts/perf_bench.py` | P4-3 性能基准（scroll/screenshot/click 延迟 + AXTree 压缩比） | `scripts/perf-report.json` |
 | `scripts/uma_coexist.py` | P4-4 UMA 共存（10 session×100 动作 + mlx 推理并发） | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action 长跑无泄漏（RSS 四分位对比） | `scripts/longrun-report.json` |
+| `scripts/navigate_execute_smoke.py` | navigate-via-execute SIGTRAP 修复验证（execute navigate 离主线程 → 引擎存活、页面加载） | 终端 PASS/FAIL |
 
 均驱动 release 二进制（`swift build -c release` 后执行），live WKWebView 不在 `swift test` 覆盖范围。
 
@@ -153,9 +156,12 @@ P4-2 RSS 自重启启用示例：
 | `CDPServer.swift` | T2.3/T3.3 CDP-WS shim：POSIX TCP + HTTP 发现 + WS 升级 + 帧编解码 + `FBCDPTranslator`（CDP 方法→ActionDriver，扩 Network/Console/Emulation/Page.lifecycleEvent/DOM）+ `FBCDPEventEmitter`（事件解耦，可确定性单测） |
 | `VisualLocator.swift` | T3.4 视觉定位兜底：截图→fusion-mlx VLM `/v1/chat/completions` 预测 `{x,y}` + OOB 防护；可插拔 `FBHTTPClient` |
 
+> E-17~20 / #68 已移除：`FBCoreBridge.swift`、`FBCoreWorkerPool.swift`、`Sources/FBCoreRust/`、`Plugins/FBCoreRustBuilder/`、`rust/fb-core/`——Rust 核心路径。AXTree 编译现走纯 Swift（`FBAXTreeReducer.toMarkdown` + `JSONDecoder`），在 `AXTree.swift` 的 `FBAXTreeExtractor.extract` 内——即 Rust 核心失败时一贯回退的那条路径。
+
 ## 路线图（详见 PRD §4）
 
 - Phase 1（基座）：引擎基座 + 六大基础设施 + action 透传 + 分档 watchdog ✓
 - Phase 2：AXTree 提炼器 + 反注入 Sanitizer + CDP 兼容层（4 Domain）+ 凭据闭环 ✓
 - Phase 3：多节点适配（T3.2）+ CDP 扩 Domain + 事件（T3.3）+ 视觉定位兜底（T3.4）✓；agent-studio 全对接（T3.1）跨项目，已上游落地
-- Phase 4（本提交，生产化加固）：无痕落盘验收（P4-1，FR-04）+ RSS 自重启（P4-2）+ 性能基准套件（P4-3）+ UMA 共存基线（P4-4，PRD T1.5）+ 1000-action 长跑无泄漏（P4-5）✓
+- Phase 4（生产化加固）：无痕落盘验收（P4-1，FR-04）+ RSS 自重启（P4-2）+ 性能基准套件（P4-3）+ UMA 共存基线（P4-4，PRD T1.5）+ 1000-action 长跑无泄漏（P4-5）✓
+- Rust 核心引擎（PRD §4.3 module 5，T1.4）：原为标志位门控 `fb_core` 静态库 + C-ABI FFI；**已在 E-17~20 / #68 移除**——PRD §2 T1.4 评估结论为纯 Swift 足以覆盖 Sanitizer+AXTree（Rust 路径默认关，纯 Swift reducer 为其回退）。审计 E-17~20（构建不可移植 / worker pool 非专用 FIFO / 无运行时对齐检查 / Cargo.lock 未进插件输入）一并随移除关闭。默认关的纯 Swift 路径现为唯一路径 ✓

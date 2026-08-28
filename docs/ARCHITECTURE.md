@@ -1,7 +1,7 @@
 # Architecture
 
 > fusion-browser — macOS native controlled browser engine.
-> Doc version: Phase 4 (2026-08-27). Authoritative spec: `~/fusion/architecture/fusion-browser-prd-0826.md` (v2.0).
+> Doc version: Phase 4 (2026-08-27); Rust core removed E-17~20 (#68). Authoritative spec: `~/fusion/architecture/fusion-browser-prd-0826.md` (v2.0).
 
 ## 1. Overview
 
@@ -9,7 +9,10 @@ fusion-browser is a macOS native controlled browser engine providing Web visual 
 structured interaction for `fusion-agent-studio`, with CDP-automation reuse for
 `fusion-cowork`. Built on macOS native WebKit (WKWebView), dual protocol stack
 (UDS length-prefixed JSON main path + CDP-over-WS compatibility layer), with six
-built-in infrastructure modules.
+built-in infrastructure modules. (E-17~20 / #68: a flag-gated Rust core compile
+module that re-derived the AXTree markdown/nodes/audit over a C-ABI FFI was
+removed — PRD §2 T1.4 evaluation concluded pure Swift covers it; the Swift
+reducer was always the default + fallback path.)
 
 **Two layers:**
 - **UDS server** — POSIX socket + per-client `DispatchSourceRead`, token auth,
@@ -77,7 +80,11 @@ FBUDSServer
 
 Each action ends with an AXTree re-extract (`FBAXTreeExtractor.extract`) so the
 state response carries a fresh `ax_tree_markdown` + `interactive_nodes` for the
-caller's next-step decision.
+caller's next-step decision. Inside `extract`, `mapping.install` (Swift — owns
+the JS WeakRef mapping) runs first, then `FBAXTreeReducer.toMarkdown` derives the
+markdown+nodes+audit in pure Swift. (E-17~20 / #68: the Rust-core FFI branch was
+removed; the Swift reducer was always the default + the fallback the Rust path
+degraded to.)
 
 ## 4. Six Infra Modules
 
@@ -155,3 +162,40 @@ is the fusion-mlx registered ID using `--` separators, not HF `/`.
 - **Client connection retention** — store the `FBClientConnection` object itself
   in `[ObjectIdentifier: FBClientConnection]`, NOT just an `ObjectIdentifier` in
   a `Set` (a Set does not retain; the `DispatchSourceRead` handler never fires).
+
+## 8. Rust Core Engine — REMOVED (E-17~20 / #68)
+
+A flag-gated Rust core compile path (PRD §4.3 module 5, `useRustCore`, default
+OFF) that re-derived the AXTree markdown + nodes + audit over a C-ABI FFI was
+**removed** in the E-17~20 audit fix. PRD §2 task T1.4 required an evaluation of
+whether pure Swift was sufficient before shipping Rust; that evaluation
+concluded pure Swift (`FBAXTreeReducer.toMarkdown` + `JSONDecoder`) covers
+Sanitizer+AXTree, and the Rust path was never the live path (it was default OFF
+and the Swift reducer was the fallback it degraded to on any FFI/decode
+failure).
+
+Removal closed all four E-17~20 findings at once:
+- **E-17** (build not portable: hardcoded arm64 triple, `PATH` drops rustup,
+  absolute `-L`) — the `FBCoreRustBuilder` plugin + `rust/fb-core/` + absolute
+  link paths deleted.
+- **E-18** (worker pool not a dedicated FIFO worker) — `FBCoreWorkerPool`
+  deleted.
+- **E-19** (no runtime parity check, wrong bytes ship silently) —
+  `RustCoreParityTests` + `scripts/parity_smoke.py` deleted; no Rust bytes to
+  drift.
+- **E-20** (`Cargo.lock` not in plugin inputs) — no plugin, no `Cargo.lock`.
+
+Deleted files: `Sources/FusionBrowser/FBCoreBridge.swift`,
+`Sources/FusionBrowser/FBCoreWorkerPool.swift`, `Sources/FBCoreRust/` (dir),
+`Plugins/FBCoreRustBuilder/` (dir), `Tests/FusionBrowserTests/RustCoreParityTests.swift`,
+`scripts/parity_smoke.py`, `rust/` (dir). The `useRustCore` config key was
+dropped from `FBEngineConfig` (existing configs with the key ignore it —
+Codable drops unknown keys).
+
+The `FBAXTreeExtractor.extract` seam is now pure Swift: `mapping.install`
+(owns the JS WeakRef mapping) → `FBAXTreeReducer.toMarkdown` →
+`SecurityAuditResult`. Wire schema + AXTree output (markdown + nodes + audit)
+are unchanged; `fusion-cowork` (UDS/CDP consumer, never the Rust core) is
+unaffected. No Rust toolchain needed; `--disable-sandbox` was mandatory only
+because the plugin ran `cargo` and is no longer required.
+

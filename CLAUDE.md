@@ -13,7 +13,7 @@ emitter (T3.3) + visual-grounding fallback via fusion-mlx VLM (T3.4); Phase 4 ad
 FR-04 non-persistence verification (P4-1) + RSS watchdog/OOM self-heal (P4-2) +
 perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action
 long-run no-leak (P4-5). T3.1 (agent-studio 对接) is cross-project: contract doc +
-issue only on this side, code lands in fusion-agent-studio. Build green, 89 tests
+issue only on this side, code lands in fusion-agent-studio. Build green, 183 tests
 pass, end-to-end UDS smoke pass, CDP `:9222` smoke pass, T3.4 verified via real VLM
 smoke, Phase 4 all verified via release binary + Python verify scripts
 (`scripts/verify_nonpersistent.py` / `perf_bench.py` / `uma_coexist.py` /
@@ -28,15 +28,22 @@ landed scope, source map, and protocol shape in detail.
 
 ```bash
 cd /Users/dahai/fusion/fusion-browser
-swift build -c release     # binary -> .build/release/fusion-browser
-swift test                 # 89 tests, asyncio not used here (pure Swift)
-swift test --filter CDPServerTests
+swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
+swift test --disable-sandbox   # 183 tests (--disable-sandbox no longer required:
+                               #  plugin gone; kept for compatibility)
+swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
 ```
 
-No venv / Python needed for build (Swift only). The Python `scripts/` are verify
-harnesses (smoke_client / perf_bench / uma_coexist / longrun_leak /
-verify_nonpersistent), not part of the build.
+No venv / Python needed for build (pure Swift). E-17~20 (#68): the Rust core was
+removed — PRD §2 T1.4 evaluation concluded pure Swift (`FBAXTreeReducer` +
+`JSONDecoder`) covers Sanitizer+AXTree, so the `FBCoreRustBuilder` plugin, the
+`FBCoreRust` target, the `rust/` tree, and the `useRustCore` config key were
+deleted (the staticlib was default OFF + never the live path). No Rust toolchain
+needed; `--disable-sandbox` was mandatory only because the plugin ran `cargo` and
+is now no longer required (kept on the gate lines for compatibility). The Python
+`scripts/` are verify harnesses (smoke_client / perf_bench / uma_coexist /
+longrun_leak / verify_nonpersistent), not part of the build.
 
 **WKWebView cannot run under `swift test`** — no main run loop means
 `evaluateJSSync`/`screenshotSync` semaphores deadlock (completion handlers dispatch
@@ -48,7 +55,16 @@ test target — they will hang the suite.
 
 Config (optional): `~/.fusion-browser/config.json` — partial JSON OK, missing
 fields fall back to `FBEngineConfig.default`. Keys: `socketPath`, `cdpEnabled`,
-`cdpPort`, `authToken`, `logLevel` (debug/info/warn/error), `allowedOrigins`,
+`cdpPort`, `authToken`, `logLevel` (debug/info/warn/error), `allowedOrigins`
+(FAIL-CLOSED per E-15 — an empty list denies EVALUATE, CDP `Page.navigate`,
+and the CDP WS upgrade; only local schemes `data:`/`about:`/`blob:` navigate
+freely),
+`tokenCapabilities` (E-9/H-5, default empty → `.default` — a string list that
+elevates the registered token's capabilities, e.g. `["evaluate"]` or `["all"]`.
+The default token lacks `.evaluate` (H-5 scoped-token model), so without this
+key the UDS/CDP evaluate action is cap-gated off (`evaluate_denied` / `.authDenied`).
+Parsed by `FBAuth.parseCaps`: names case-insensitive, match `FBCapabilities`
+members; "all" → `.all`; unknown names dropped fail-closed (never broaden)),
 `visualLocator` (T3.4 visual-grounding fallback, default OFF — sub-keys
 `endpoint`/`model`/`timeoutMs`/`enabled`; when enabled the VLM must be loaded in
 fusion-mlx first; `model` is the registered ID with `--` not `/`, e.g.
@@ -58,6 +74,10 @@ self-heal, default OFF — sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/
 `mach_task_basic_info.resident_size`, one-shot breach fires drain-all-sessions
 or exit-for-supervisor-restart), `guards` (FR-13 scheduling guards, default
 `maxActions=200`/`taskTimeoutMs=300000`/`repeatActionBreak=3`/`rebuildDepthCap=1`).
+E-23: `rebuildDepth` counts ONLY real replays — `handleCrash` checks `isIdempotent`
+FIRST and calls `scheduler.canRebuild()` (which increments) only on the idempotent
+replay branch; a non-idempotent crash (navigate/click/type/evaluate) fails directly
+without consuming the cap, so two slow-page click timeouts no longer brick the session.
 
 ## Architecture
 
@@ -116,9 +136,16 @@ The six infra modules (each a single file, see README source map):
   `DOM.resolveNode`→`result.object.objectId`. T3.3 extended domains:
   Network (requestWillBeSent/responseReceived/loadingFinished), Runtime
   consoleAPICalled, Page.frameNavigated + lifecycleEvent, DOM.focus /
-  DOM.setFileInputFiles, Emulation (no-op). The CDP layer does NOT token-gate;
-  security is EVALUATE origin whitelist + UDS token. Default off (`cdpEnabled`);
-  enable in config only when cowork needs it.
+  DOM.setFileInputFiles, Emulation (no-op). The CDP layer DOES Bearer-gate since
+  H-5 (HTTP `/json` + WS upgrade require `Authorization: Bearer <token>`,
+  fail-closed), and the origin gate is strict since E-15: WS upgrade, CDP
+  `Page.navigate`, and `PUT /json/new?<url>` all deny on an empty Origin header
+  or an empty `allowedOrigins` list (fail-closed, consistent with EVALUATE);
+  local schemes `data:`/`about:` still navigate. Default off (`cdpEnabled`).
+  NOTE: cowork's CDP client omits the Origin header and ships an empty allowlist
+  by default, so under strict E-15 its WS upgrade + remote navigate are DENIED —
+  cowork must send an allowlisted Origin + configure `allowedOrigins` to use CDP.
+  This is a deliberate cross-project contract change (issue → PR in fusion-cowork).
 - **CDP events are decoupled into `FBCDPEventEmitter`** (T3.3). Event emission
   was originally inline in `FBCDPConnection` tied to the live socket + webview;
   that made it untestable (Page.navigate triggers live WKWebView → `swift test`
@@ -127,6 +154,27 @@ The six infra modules (each a single file, see README source map):
   `_dispatch_event` buffers Network.*/Runtime.consoleAPICalled). Test it with a
   `CaptureBox` reference wrapper — a value-type `var` captured by a closure
   snapshots BEFORE the append, so the caller sees empty (hard-won fix).
+  **E-11 (#67) resolution:** `pushConsoleEvents` was dead code (defined, never
+  called) — wired: `FBCDPConnection.drainConsoleEvents` reads `window.__fbConsole`
+  (the console shim buffer installed in `WebView.swift`) via `evaluateJSSync` after
+  navigate + after `Runtime.evaluate` and drains it into
+  `Runtime.consoleAPICalled` events. Nav event order fixed to real-Chrome
+  (`Network.requestWillBeSent → responseReceived → loadingFinished` then
+  `Page.frameNavigated → DOMContentLoaded → load`; was inverted). `loaderId`/
+  `requestId` now per-nav (`fb-loader-<seq>`/`fb-req-<seq>`, was constants);
+  `frameId` stays constant per frame (real-Chrome semantics).
+  `Network.responseReceived` now reports the REAL status captured by a new
+  `WKNavigationDelegate.decidePolicyFor navigationResponse` on FBWebView
+  (`lastResponse`, NSLock-guarded, cleared on nav start + destroy); was hardcoded
+  `200`. status `0` when no response captured (local schemes, no session).
+  Subresource responses still unknown (WKWebView hides them; only the main-document
+  response is captured) — documented limitation, cowork's navigate is main-document
+  only. Events emit in one synchronous burst after load completion (the shim cannot
+  stream during load; `executeAction` blocks to didFinish, so the response is
+  already captured). cowork buffers Network+console raw, no field-level reader —
+  these are contract-honesty fixes, no cowork runtime-behavior change. Live-pinned
+  by `scripts/cdp_event_smoke.py` (403 status surfaces as 403, console.log wired,
+  real-Chrome order, per-nav loaderId; R-7 hard gate).
 - **T3.4 visual fallback is best-effort, never primary.** `FBVisualLocator`
   fires ONLY on click `node_stale`. It screenshots via `screenshotSync` (WKSnapshot
   PNG, not CoreGraphics — headless offscreen webview isn't on a CoreGraphics
@@ -151,13 +199,29 @@ The six infra modules (each a single file, see README source map):
   fills every placeholder, starves the rest, so `expectFp` gets the nodeId →
   fingerprint never matches → EVERY click/type returns `node_stale`. This was the
   most severe Phase 4-found bug; it broke the entire click+type contract.
-- **`create` with `initial_url` and `close` MUST run AppKit ops on main.**
-  `WKWebView.load` in `create` and `stopLoading`/`removeFromSuperview`/`hostWindow.close`
-  in `close` trap (exit 133) when called off the sessionmgr background queue.
-  `create` wraps the navigate in `DispatchQueue.main.async`; `FBSession.close`
-  dispatches `destroy()` to main via `DispatchQueue.main.sync`. `manager.close`
-  extracts the session under the queue lock FIRST, then tears down the webview on
-  main WITHOUT holding the queue lock (avoids main↔sessionmgr lock inversion).
+- **`create` with `initial_url`, `close`, AND execute navigate MUST run AppKit
+  ops on main.** `WKWebView.load` traps (exit 133) off-main. `create` wraps the
+  navigate in `DispatchQueue.main.async`; `FBSession.close` dispatches
+  `destroy()` to main via `DispatchQueue.main.sync`; `manager.close` extracts
+  the session under the queue lock FIRST, then tears down the webview on main
+  WITHOUT holding the queue lock (avoids main↔sessionmgr lock inversion).
+  Execute navigate hits the SAME trap: `ActionDriver.dispatch` runs inside the
+  `runWithWatchdog` block on `DispatchQueue.global()`, so `WebView.navigate`
+  must main-hop `wv.load` when off-main (sync semaphore wait; never sync-wait
+  ON main). Covers UDS + CDP — both route through `runWithWatchdog`. Verified
+  via `scripts/navigate_execute_smoke.py` (create WITHOUT initial_url, then
+  execute navigate).
+- **E-17~20 (#68) resolution: Rust core removed.** PRD §2 T1.4 evaluation
+  concluded pure Swift (`FBAXTreeReducer` + `JSONDecoder`) covers Sanitizer+
+  AXTree; the Rust path was default OFF and never the live path. Removed
+  `FBCoreBridge` / `FBCoreWorkerPool` / `FBCoreRust` target / `FBCoreRustBuilder`
+  plugin / `rust/` tree / `useRustCore` config key / `RustCoreParityTests` /
+  `parity_smoke.py`. The `FBAXTreeExtractor.extract` seam is now pure Swift:
+  `mapping.install` (always Swift) + `FBAXTreeReducer.toMarkdown` +
+  `SecurityAuditResult` — the same path the Rust core degraded to on failure.
+  `--disable-sandbox` no longer required (no plugin runs cargo; kept on gate
+  lines for compatibility). Wire schema + AXTree output unchanged; cowork
+  unaffected. See `docs/ARCHITECTURE.md` §8.
 - **`FBMemoryWatchdog` guards host-side RSS only, not WebContent.** It samples
   `mach_task_basic_info.resident_size` (host process, excludes the separate
   WebContent procs bounded by FR-08 quota). One-shot breach: fires `onBreach` once,
@@ -172,6 +236,68 @@ The six infra modules (each a single file, see README source map):
   away, making all subsequent clicks on that session stale). `__fbMap` is empty
   until the first extract, so the first click on a session needs a prior
   screenshot/extract warmup or it goes `node_stale`.
+- **E-9 Runtime.evaluate returns the real JS result, not a synthetic `"ok"`.**
+  `ActionDriver`'s `.evaluate` case captures `evaluateJSSync`'s return (a
+  Foundation JSON-deserialized value: NSString/NSNumber/NSNull/NSArray/NSDictionary),
+  JSON-encodes it with `.fragmentsAllowed` (bare top-level values — NOT the
+  default `.withoutEscapingSlashes`-style object-only path) into
+  `BrowserStateResponse.evaluateResult: String?`. CDP `handleEvaluate` mirrors
+  this through `cdpRemoteObject` (NSNull→`undefined`, Bool→`boolean`,
+  NSNumber→`number`, String→`string`, array/dict→`object`). void/undefined →
+  nil (no field). The default token lacks `.evaluate` (H-5 scoped-token
+  model) → elevate via the `tokenCapabilities` config key (`["all"]`/`["evaluate"]`),
+  else UDS/CDP evaluate is cap-gated off. `evaluateJSSyncArgs` replaces ONE
+  `__ARG__` per arg IN ORDER (range+replaceSubrange) — do NOT switch to
+  `replacingOccurrences(of:)` (replaces ALL per arg, starves later args).
+- **E-8 CDP DOM domain derefs real elements via a per-connection registry.** The
+  5 `DOM.*` methods route through ONE persistent `FBCDPTranslator` per
+  `FBCDPConnection` (minted at WS upgrade, reused for every frame — NOT a fresh
+  translator per message, which would wipe the registry between `getFullAXTree`
+  and the later `resolveNode`/`focus`/`getBoxModel` and break both cowork
+  flows). The registry (`intToIdStr` / `objectIdToIdStr` / `idStrToSelector`,
+  `NSLock`-guarded on `FBCDPTranslator`) bridges CDP handles (integer
+  `nodeId`/`backendNodeId`, opaque `objectId`) to the walker's idStr (`"eN"`
+  from `getFullAXTree`/`getDocument`, `"qN"` from `querySelector`). All derefs
+  go through one JS resolver `window.__fbMap.get(idStr)`. `getFullAXTree` +
+  `getDocument` call `registerIdStr` for every observed `eN` (else
+  `resolveNode(backendNodeId)` finds an empty registry → no objectId).
+  `querySelector` mints a `qN` id, registers the match in `__fbMap` under it,
+  AND stores `selector→idStr` in `idStrToSelector` for a re-query fallback
+  (the walker rebuilds `__fbMap` fresh each extract, dropping `qN` entries —
+  `buildBoxModelJS`/`buildFocusJS` re-`querySelector` the stored selector when
+  the `WeakRef` is gone). The JS builders return BARE JS OBJECTS
+  (`{ok:true,...}`), NOT `JSON.stringify(...)` — E-9 made `.evaluate`
+  JSON-encode the deserialized JS return, so a `JSON.stringify` here
+  double-encodes (`"{\"ok\":...}"`) and the handler's `[String:Any]` decode
+  fails → silent `nodeId:0`. The `querySelector` IIFE arg must be the FULL
+  `jsStr(selector)` (with quotes), not the unwrapped inner — `})(#u);` is a JS
+  syntax error (bare `#u`), throws → no result. `getBoxModel` returns the REAL
+  `getBoundingClientRect` quad (8 coords, TL→TR→BR→BL), not the old 1280×800
+  stub; stale/missing → `-32000 node stale` (honest, E-13 cross-extract
+  stability is #66). `resolveNode` returns a registered `"fb-obj-<seq>"`
+  objectId, not the old unregistered `"fb-node-N"`. E-8 guarantees a handle
+  derefs against the CURRENT `__fbMap` only; a SPA re-render between
+  `getFullAXTree` and the click is E-13 (#66), not E-8. Live-verified by
+  `scripts/cdp_dom_smoke.py` (both cowork flows over CDP WS; R-7 hard gate).
+- **E-13 (#66) `backendNodeId` stability — option (b), document as order-based.**
+  `backendNodeId` is a DOCUMENT-ORDER POSITION (1-based Nth interactive node in
+  `getFullAXTree`), stable only for static pages. SPA reorders shift it —
+  `backendNodeId:5` after a re-render derefs the CURRENT 5th node, not the
+  snapshotted element (honest order-based identity). Tree-shrink fail-closes
+  (`-32000 node stale` when the idStr is absent from the fresh `__fbMap`).
+  `handleResolveNode` re-extracts + re-registers observed `eN` before minting an
+  objectId (self-priming, mirrors `handleGetDocument` — it was the only DOM
+  handler that did not extract+register). Cross-extract handle reuse is
+  UNSUPPORTED: callers MUST re-fetch `getFullAXTree` before acting on a reordered
+  page. `intToIdStr[N]→"eN"` is a pure identity (`stableNodeId` reversible),
+  never stale; `"eN"` is rebound to the current Nth element each extract. A
+  fingerprint-based stable id (option a) was rejected: the existing `fingerprint`
+  embeds sibling indices via `docPath` (order-bound), and making it order-free
+  risks wrong-element clicks on attr-less siblings for no cowork benefit
+  (cowork treats handles as single-use — no cross-action cache, so E-13 is not
+  a failure mode cowork triggers). Live-pinned by `scripts/cdp_dom_smoke.py`
+  Flow C (reorder between getFullAXTree and resolveNode → resolves current Nth,
+  NOT the snapshotted element).
 
 ## Downstream Consumer
 
