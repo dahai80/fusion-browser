@@ -15,9 +15,11 @@ on:
 # ONLY by the built release binary + the Python harnesses in scripts/ (release_gate.sh).
 #
 # Two jobs:
-#   build-and-test  — GitHub-hosted macOS-14 arm64. swift build + swift test (198).
+#   build-and-test  — GitHub-hosted macOS-15 arm64. swift build + swift test (198).
 #                     Fast, reliable, no special runner. Proves the package compiles
-#                     and deterministic tests pass on a clean machine.
+#                     and deterministic tests pass on a clean machine. NOTE: macOS-14
+#                     image ships Swift 5.10 only — the package needs Swift 6.0
+#                     (Package.swift swift-tools-version 6.0.0), so macOS-15 is required.
 #   live-path-gate  — self-hosted macOS runner with a GUI session (WKWebView needs a
 #                     CoreGraphics display + main run loop to navigate/evaluate/screenshot)
 #                     AND a running fusion-mlx inference engine (uma_coexist samples
@@ -32,7 +34,7 @@ on:
 jobs:
   build-and-test:
     name: build + unit tests (deterministic)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
