@@ -13,7 +13,7 @@ emitter (T3.3) + visual-grounding fallback via fusion-mlx VLM (T3.4); Phase 4 ad
 FR-04 non-persistence verification (P4-1) + RSS watchdog/OOM self-heal (P4-2) +
 perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action
 long-run no-leak (P4-5). T3.1 (agent-studio 对接) is cross-project: contract doc +
-issue only on this side, code lands in fusion-agent-studio. Build green, 186 tests
+issue only on this side, code lands in fusion-agent-studio. Build green, 188 tests
 pass, end-to-end UDS smoke pass, CDP `:9222` smoke pass, T3.4 verified via real VLM
 smoke, Phase 4 all verified via release binary + Python verify scripts
 (`scripts/verify_nonpersistent.py` / `perf_bench.py` / `uma_coexist.py` /
@@ -29,7 +29,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 186 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 188 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -106,7 +106,7 @@ only) / `close`.
 
 The six infra modules (each a single file, see README source map):
 - `Config.swift` — FR-08 quota by RAM, FR-13 scheduling guards, watchdog policy
-- `Framing.swift` — FR-09 frame reader, overflow backpressure
+- `Framing.swift` — FR-09 frame reader, overflow backpressure + B-4 partial-frame arrival timeout
 - `Auth.swift` — FR-10 token + capabilities, EVALUATE origin whitelist
 - `ErrorModel.swift` — FR-11 structured `{code,message,retryable}`
 - `Observability.swift` — FR-12 metrics + trace_id + credential audit log

@@ -17,7 +17,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 - UDS 服务端（POSIX socket + `DispatchSourceRead`，绕开 `NWListener` AF_UNIX accept 不可靠问题）
 - 长度前缀 JSON 分帧（schema 对齐，snake_case，codec 可后续替换为 gRPC）
 - FR-08 资源管控：按物理 RAM 动态核定 session 数/内存预算，超配额拒绝
-- FR-09 流控背压：每 client 独立读循环、单 socket 大帧不阻塞他人、超 cap 丢弃
+- FR-09 流控背压：每 client 独立读循环、单 socket 大帧不阻塞他人、超 cap 丢弃；B-4 半帧到达超时——慢滴 client 的不完整帧超过 30s 即丢弃断连
 - FR-10 鉴权能力模型：shared-secret token，每 action capability 校验，EVALUATE 需独立 capability + origin 白名单
 - FR-11 错误模型：结构化 `{code,message,retryable}`，预定义错误码枚举（node_stale/credential_locked/quota_exceeded/evaluate_denied/timeout/replay_limit 等）
 - FR-12 可观测性：metrics（计数 + 延迟分位数）+ trace_id 全链路 + 凭据 append-only 审计日志
@@ -144,7 +144,7 @@ P4-2 RSS 自重启启用示例：
 | `Config.swift` | FR-08 资源配额（按 RAM）+ FR-13 调度护栏 + watchdog 策略 + P4-2 `memoryWatchdog` 配置 + 配置加载 |
 | `MemoryWatchdog.swift` | P4-2 进程级 RSS 监控（`mach_task_basic_info` 采样）+ 一次性 breach 恢复闭包 + 可插拔 sampler |
 | `Observability.swift` | FR-12 metrics + trace_id + 凭据审计日志 |
-| `Framing.swift` | FR-09 帧读取器（多帧拆分 + 超限背压丢弃） |
+| `Framing.swift` | FR-09 帧读取器（多帧拆分 + 超限背压丢弃 + B-4 半帧到达超时） |
 | `Session.swift` | 会话状态机 + 调度器（admit/canRebuild/幂等分类） |
 | `Credentials.swift` | FR-05/T2.4 Keychain 凭据托管（存完整 cookie 属性，锁屏检测） |
 | `AXWalker.swift` | T2.1 注入 JS walker 脚本 + 稳定映射（结构指纹/WeakRef）+ FBExtractedNode/Result |

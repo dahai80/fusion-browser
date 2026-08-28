@@ -60,7 +60,7 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 - UDS server (POSIX socket + `DispatchSourceRead`, bypassing the unreliable `NWListener` AF_UNIX accept)
 - Length-prefixed JSON framing (schema-aligned, snake_case; codec swappable to gRPC later)
 - FR-08 resource control: dynamic session count / memory budget by physical RAM, over-quota rejected
-- FR-09 flow backpressure: per-client read loop, one socket's large frame does not block others, over-cap dropped
+- FR-09 flow backpressure: per-client read loop, one socket's large frame does not block others, over-cap dropped; partial-frame arrival timeout (B-4) drops a slow-drip client whose incomplete frame overstays 30s
 - FR-10 auth capability model: shared-secret token, per-action capability check, EVALUATE needs separate capability + origin whitelist
 - FR-11 error model: structured `{code,message,retryable}`, predefined error codes (node_stale/credential_locked/quota_exceeded/evaluate_denied/timeout/replay_limit, etc.)
 - FR-12 observability: metrics (count + latency quantiles) + trace_id full chain + credential append-only audit log
@@ -100,7 +100,7 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 186 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 188 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 
@@ -190,7 +190,7 @@ NOT real Chrome — a shim translating cowork `cdp_client.py`'s real CDP transpo
 | `Config.swift` | FR-08 resource quota (by RAM) + FR-13 scheduling guards + watchdog policy + P4-2 `memoryWatchdog` config + config loading |
 | `MemoryWatchdog.swift` | P4-2 process-level RSS monitor (`mach_task_basic_info` sampling) + one-shot breach recovery closure + pluggable sampler |
 | `Observability.swift` | FR-12 metrics + trace_id + credential audit log |
-| `Framing.swift` | FR-09 frame reader (multi-frame split + over-limit backpressure drop) |
+| `Framing.swift` | FR-09 frame reader (multi-frame split + over-limit backpressure drop + B-4 partial-frame arrival timeout) |
 | `Session.swift` | session state machine + scheduler (admit/canRebuild/idempotent classify) |
 | `Credentials.swift` | FR-05/T2.4 Keychain credential custody (stores full cookie attributes, lock-screen detect) |
 | `AXWalker.swift` | T2.1 injected JS walker script + stable mapping (structural fingerprint/WeakRef) + FBExtractedNode/Result |

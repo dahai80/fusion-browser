@@ -3,7 +3,7 @@
 # swift test covers 0% of the WKWebView live path (ARCH-3: no main run loop under
 # swift test -> evaluateJSSync/screenshotSync deadlock). The live path is verified ONLY
 # by the built release binary + the Python verify harnesses in scripts/. This gate
-# wires them into one PASS/FAIL gate so "186 tests green" can never be misread as a
+# wires them into one PASS/FAIL gate so "188 tests green" can never be misread as a
 # live-path regression pass.
 #
 # E-17~20 (#68): Rust core removed — build is pure Swift now, no plugin, no cargo.
@@ -13,7 +13,7 @@
 #
 # Gate stages (each is a hard gate — first failure aborts with non-zero exit):
 #   1. swift build -c release --disable-sandbox   (pure Swift, no plugin)
-#   2. swift test --disable-sandbox               (deterministic unit tests, 186)
+#   2. swift test --disable-sandbox               (deterministic unit tests, 188)
 #   3. live-path verify harnesses against the release binary:
 #        verify_nonpersistent.py  (FR-04 non-persistence)
 #        navigate_execute_smoke.py (create-no-url -> execute navigate -> extract)
@@ -58,8 +58,8 @@ run_gate() {
 # --- stage 1: build ---
 run_gate "swift build -c release" swift build -c release --disable-sandbox
 
-# --- stage 2: deterministic tests (186) ---
-run_gate "swift test (186)" swift test --disable-sandbox
+# --- stage 2: deterministic tests (188) ---
+run_gate "swift test (188)" swift test --disable-sandbox
 
 # --- stage 3: live-path verify harnesses ---
 # These drive the RELEASE binary over UDS. Each harness starts/stops its own binary

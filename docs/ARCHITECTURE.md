@@ -93,7 +93,7 @@ Each a single file (see source map in `README.md`):
 | Module | File | Responsibility |
 |--------|------|----------------|
 | Config | `Config.swift` | FR-08 quota by RAM, FR-13 scheduling guards, watchdog policy, `memoryWatchdog` + `visualLocator` config |
-| Framing | `Framing.swift` | FR-09 frame reader, multi-frame split, overflow backpressure drop |
+| Framing | `Framing.swift` | FR-09 frame reader, multi-frame split, overflow backpressure drop, B-4 partial-frame arrival timeout (30s) |
 | Auth | `Auth.swift` | FR-10 token + capabilities, EVALUATE origin whitelist |
 | ErrorModel | `ErrorModel.swift` | FR-11 structured `{code,message,retryable}` + `FBResult` |
 | Observability | `Observability.swift` | FR-12 metrics + trace_id + credential audit log. R-3/B-3: `metricsArray()` surfaces counters + latency p50/p95 via UDS `{type:"metrics"}` (`.metrics` cap, opt-in) + CDP `Performance.getMetrics` (was write-only / empty `[]`) |

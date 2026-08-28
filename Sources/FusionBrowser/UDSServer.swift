@@ -166,9 +166,11 @@ final class FBClientConnection {
             readSource?.cancel()
             return
         }
-        let (frames, overflow) = reader.append(Data(bytes: buf, count: n))
-        log.debug("Client", "recv \(n) bytes frames=\(frames.count) overflow=\(overflow)")
+        let (frames, overflow, timeout) = reader.append(Data(bytes: buf, count: n))
+        log.debug("Client", "recv \(n) bytes frames=\(frames.count) overflow=\(overflow) timeout=\(timeout)")
         if overflow { send(error: .invalidRequest); readSource?.cancel(); return }
+        // B-4/R-6: partial frame overstayed frameTimeoutMs -> drop the slow-drip client.
+        if timeout { send(error: .invalidRequest); readSource?.cancel(); return }
         for frame in frames { handleFrame(frame) }
     }
 
