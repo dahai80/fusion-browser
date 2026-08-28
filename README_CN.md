@@ -19,6 +19,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 - FR-08 资源管控：按物理 RAM 动态核定 session 数/内存预算，超配额拒绝
 - FR-09 流控背压：每 client 独立读循环、单 socket 大帧不阻塞他人、超 cap 丢弃；B-4 半帧到达超时——慢滴 client 的不完整帧超过 30s 即丢弃断连
 - FR-10 鉴权能力模型：shared-secret token，每 action capability 校验，EVALUATE 需独立 capability + origin 白名单
+- B-5/E-34 会话归属：每个 UDS 连接生成 UUID owner id，客户端只能 execute/close 自己创建的会话（不匹配返回 `not_owner`），系统调用绕过；E-35 每客户端在途批次上限（`maxBatch=64`）限制单次读取帧数，防止被灌爆的 socket 独占主线程
 - FR-11 错误模型：结构化 `{code,message,retryable}`，预定义错误码枚举（node_stale/credential_locked/quota_exceeded/evaluate_denied/timeout/replay_limit 等）
 - FR-12 可观测性：metrics（计数 + 延迟分位数）+ trace_id 全链路 + 凭据 append-only 审计日志
 - FR-13 调度护栏：max_actions + task_timeout + 连续相同 action 中断 + 重建深度上限 1

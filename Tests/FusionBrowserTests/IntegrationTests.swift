@@ -42,6 +42,142 @@ final class IntegrationTests: XCTestCase {
     }
 }
 
+// B-5/E-34: session ownership. A client (owner id) that creates a session owns it; another
+// client operating that session by id is denied not_owner. System-owned sessions (ownerId
+// nil — CDP ensureSession, teardown) are operable by any caller. These run under swift test
+// — the owner check is a pure dict+string compare, no live WKWebView.
+final class SessionOwnershipTests: XCTestCase {
+    private func makeManager(maxSessions: Int = 4) -> FBSessionManager {
+        let q = FBResourceQuota(maxSessions: maxSessions, maxMemoryPerSessionMB: 150,
+                                maxTotalMemoryMB: maxSessions * 150)
+        return FBSessionManager(quota: q, guards: FBSchedulingGuards(),
+                                watchdog: FBWatchdogPolicy.default, creds: FBCredentialManager(),
+                                auth: FBAuth(token: "t"), allowedOrigins: [])
+    }
+
+    // Owner A creates a session; owner B's get returns .notOwner, A's returns .success.
+    func testOwnerMismatchDeniedOnGet() {
+        let mgr = makeManager()
+        let res = mgr.create(req: CreateSessionRequest(mode: .headless), traceId: nil, ownerId: "clientA")
+        guard case .success(let cr) = res else { XCTFail("create failed"); return }
+        // A can get its own session.
+        if case .failure = mgr.get(cr.sessionId, ownerId: "clientA") {
+            XCTFail("owner A must retrieve its own session")
+        }
+        // B is denied with not_owner (NOT sessionNotFound — the session exists).
+        switch mgr.get(cr.sessionId, ownerId: "clientB") {
+        case .failure(let e): XCTAssertEqual(e.code, "not_owner", "B operating A's session -> not_owner")
+        default: XCTFail("B must be denied")
+        }
+        // System (ownerId nil) CAN retrieve a client-owned session (system bypasses ownership).
+        if case .failure = mgr.get(cr.sessionId, ownerId: nil) {
+            XCTFail("system (nil owner) must bypass ownership and retrieve the session")
+        }
+    }
+
+    // Owner B cannot close A's session — close returns not_owner and the session stays live.
+    func testOwnerMismatchDeniedOnClose() {
+        let mgr = makeManager()
+        let res = mgr.create(req: CreateSessionRequest(mode: .headless), traceId: nil, ownerId: "clientA")
+        guard case .success(let cr) = res else { XCTFail("create failed"); return }
+        let err = mgr.close(sessionId: cr.sessionId, ownerId: "clientB")
+        XCTAssertEqual(err?.code, "not_owner", "B closing A's session -> not_owner")
+        XCTAssertEqual(mgr.count(), 1, "not_owner close must NOT tear down the session")
+        // A can still close it.
+        XCTAssertNil(mgr.close(sessionId: cr.sessionId, ownerId: "clientA"))
+        XCTAssertEqual(mgr.count(), 0)
+    }
+
+    // System-owned session (ownerId nil, e.g. CDP ensureSession) is operable by any client —
+    // ownership gates client-to-client isolation, not system-to-client.
+    func testSystemOwnedSessionOperableByAnyClient() {
+        let mgr = makeManager()
+        // Create as system (no ownerId).
+        let res = mgr.create(req: CreateSessionRequest(mode: .headless), traceId: nil)
+        guard case .success(let cr) = res else { XCTFail("create failed"); return }
+        // Any client can get + close a system-owned session.
+        if case .failure = mgr.get(cr.sessionId, ownerId: "anyClient") {
+            XCTFail("system-owned session must be operable by any client (get)")
+        }
+        XCTAssertNil(mgr.close(sessionId: cr.sessionId, ownerId: "anyClient"),
+                     "system-owned session must be closeable by any client")
+    }
+
+    // Existing system accessors (get(_:), close(sessionId:)) bypass ownership — used by CDP
+    // ensureSession, reaper, teardown, and the existing tests. They must keep working on a
+    // client-owned session (the owner check is the UDS-route concern, not the system path).
+    func testSystemAccessorsBypassOwnership() {
+        let mgr = makeManager()
+        let res = mgr.create(req: CreateSessionRequest(mode: .headless), traceId: nil, ownerId: "clientA")
+        guard case .success(let cr) = res else { XCTFail("create failed"); return }
+        XCTAssertNotNil(mgr.get(cr.sessionId), "system get(_:) bypasses ownership")
+        XCTAssertNil(mgr.close(sessionId: cr.sessionId), "system close(sessionId:) bypasses ownership")
+    }
+
+    // get on a non-existent session returns sessionNotFound, not not_owner (distinct codes
+    // so audit/telemetry can distinguish "doesn't exist" from "not yours").
+    func testGetMissingSessionReturnsNotFound() {
+        let mgr = makeManager()
+        switch mgr.get("nope", ownerId: "clientA") {
+        case .failure(let e): XCTAssertEqual(e.code, "session_not_found")
+        default: XCTFail("missing session -> session_not_found, not not_owner")
+        }
+    }
+}
+
+// B-5/E-35: per-client in-flight batch cap. onReadable must bound the frames processed per
+// read so a single 64KB recv (~2000 small frames) cannot queue 2000 blocking driver.execute
+// on main in one burst. The bound is FBClientConnection.splitBatch — a pure slice that takes
+// at most `max` frames and defers the rest (lossless: no frame dropped, just spread across
+// reads). splitBatch is the testable seam for the bound (the drain loop just applies it).
+final class ClientBatchCapTests: XCTestCase {
+    private func makeFrames(_ n: Int) -> [Data] {
+        return (0..<n).map { Data([UInt8($0 & 0xFF)]) }
+    }
+
+    // A flood larger than the cap is sliced: first call takes exactly `max`, rest deferred.
+    func testFloodSlicedToCap() {
+        var pending = makeFrames(200)
+        let taken = FBClientConnection.splitBatch(&pending, max: 64)
+        XCTAssertEqual(taken.count, 64, "first drain bounded to cap (64)")
+        XCTAssertEqual(pending.count, 136, "remainder deferred losslessly")
+        // Order preserved (FIFO).
+        XCTAssertEqual(taken.first, Data([0]))
+        XCTAssertEqual(taken.last, Data([63]))
+    }
+
+    // A batch smaller than the cap is taken whole (no artificial stall).
+    func testSmallBatchTakenWhole() {
+        var pending = makeFrames(10)
+        let taken = FBClientConnection.splitBatch(&pending, max: 64)
+        XCTAssertEqual(taken.count, 10)
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    // Repeated drains consume the whole backlog in ceil(N/max) passes — no frame lost.
+    func testRepeatedDrainConsumesAll() {
+        var pending = makeFrames(200)
+        var total = 0
+        while !pending.isEmpty {
+            total += FBClientConnection.splitBatch(&pending, max: 64).count
+        }
+        XCTAssertEqual(total, 200, "lossless: all frames eventually processed")
+    }
+
+    // Empty pending -> empty slice (no spurious work).
+    func testEmptyPendingYieldsEmpty() {
+        var pending: [Data] = []
+        XCTAssertTrue(FBClientConnection.splitBatch(&pending, max: 64).isEmpty)
+    }
+
+    // max <= 0 is a no-op guard (never takes frames on a misconfig).
+    func testNonPositiveMaxIsNoOp() {
+        var pending = makeFrames(5)
+        XCTAssertTrue(FBClientConnection.splitBatch(&pending, max: 0).isEmpty)
+        XCTAssertEqual(pending.count, 5)
+    }
+}
+
 // E-21/E-22: session lifecycle lock + close barrier. webview is a lock-backed field (no
 // data race between a reader thread and close()'s nil write); close() flips an atomic
 // isClosing flag + nils the webview BEFORE the main-hop teardown so a concurrent execute

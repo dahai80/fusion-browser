@@ -67,15 +67,22 @@ UDS path (main):
 ```
 FBUDSServer
   → FBClientConnection (auth-gates FIRST frame; strong-retained in [ObjectIdentifier: conn])
+    → owner id (UUID, B-5/E-34) minted at init; recorded on create, verified on
+      execute/close (not_owner on mismatch; system callers pass nil and bypass)
+    → in-flight batch cap (B-5/E-35, maxBatch=64): at most 64 frames per onReadable;
+      excess buffered in pendingFrames, drained on next read + queue.async re-arm
+      (lossless — no frame dropped, flood spread across reads)
     → FBRequest route
       → SessionManager.create  : quota check (FR-08) + main-thread WKWebView
-                                  creation + credential inject
+                                  creation + credential inject + owner id record
       → ActionDriver.execute   : capability check (FR-10) + EVALUATE origin check
+                                  + owner-aware get (B-5/E-34)
                                   + node-id normalize (strip leading @)
                                   + tiered watchdog (NFR-R) + crash rebuild
                                   (idempotent actions only)
-      → close                  : extract session under queue lock, teardown webview
-                                  on main WITHOUT holding lock (avoid lock inversion)
+      → close                  : owner-aware extract under queue lock (B-5/E-34),
+                                  teardown webview on main WITHOUT holding lock
+                                  (avoid lock inversion)
 ```
 
 Each action ends with an AXTree re-extract (`FBAXTreeExtractor.extract`) so the
@@ -95,9 +102,10 @@ Each a single file (see source map in `README.md`):
 | Config | `Config.swift` | FR-08 quota by RAM, FR-13 scheduling guards, watchdog policy, `memoryWatchdog` + `visualLocator` config |
 | Framing | `Framing.swift` | FR-09 frame reader, multi-frame split, overflow backpressure drop, B-4 partial-frame arrival timeout (30s) |
 | Auth | `Auth.swift` | FR-10 token + capabilities, EVALUATE origin whitelist |
-| ErrorModel | `ErrorModel.swift` | FR-11 structured `{code,message,retryable}` + `FBResult` |
+| ErrorModel | `ErrorModel.swift` | FR-11 structured `{code,message,retryable}` + `FBResult` + B-5 `not_owner`/`busy` codes |
 | Observability | `Observability.swift` | FR-12 metrics + trace_id + credential audit log. R-3/B-3: `metricsArray()` surfaces counters + latency p50/p95 via UDS `{type:"metrics"}` (`.metrics` cap, opt-in) + CDP `Performance.getMetrics` (was write-only / empty `[]`) |
 | Session | `Session.swift` | scheduler: admit / repeat-break / rebuild-depth-cap / idempotent classify |
+| UDSServer | `UDSServer.swift` | POSIX AF_UNIX accept + per-client serial queue. B-5/E-34 per-connection UUID owner id + E-35 in-flight batch cap (`maxBatch=64`, lossless defer). Owner-aware create/execute/close route |
 
 ## 5. CDP-over-WS Shim Layer
 

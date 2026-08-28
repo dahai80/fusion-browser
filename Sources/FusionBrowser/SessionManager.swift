@@ -24,6 +24,11 @@ public final class FBSession {
     public let scheduler: FBScheduler
     public let credentialDomain: String?
     public var credentialInjected: Bool
+    // B-5/E-34: the client connection that created this session. nil = system-owned
+    // (CDP ensureSession, manager teardown, tests) — system-owned sessions are operable
+    // by any caller. A non-nil owner restricts execute/close to that same owner id; a
+    // mismatched caller gets `not_owner` at the UDS route. Set once at create, immutable.
+    public let ownerId: String?
     // E-21: `webview` was a plain `private(set) var` read by ActionDriver/CDP on one
     // thread (client queue / global watchdog) and nil'd by close() on another (client
     // queue or memwatchdog queue) with zero synchronization -> Swift memory-model UB
@@ -71,7 +76,7 @@ public final class FBSession {
     public let extractor: FBAXTreeExtractor
 
     public init(id: String, mode: WebMode, guards: FBSchedulingGuards, credentialDomain: String?,
-                webview: FBWebView) {
+                webview: FBWebView, ownerId: String? = nil) {
         self.id = id
         self.mode = mode
         self.createdAt = Date().timeIntervalSince1970
@@ -82,6 +87,7 @@ public final class FBSession {
         self.webviewField = webview
         self.lastActivityTs = self.createdAt
         self.extractor = FBAXTreeExtractor()
+        self.ownerId = ownerId
     }
 
     public func transition(to next: FBSessionState) {
@@ -215,7 +221,7 @@ public final class FBSessionManager {
 
     // FR-08: enforce max sessions + total memory. Returns quota_exceeded if over cap.
     // T3.2: quota checked BEFORE WKWebView creation (don't burn main-thread alloc on reject).
-    public func create(req: CreateSessionRequest, traceId: String?) -> FBResult<CreateSessionResponse> {
+    public func create(req: CreateSessionRequest, traceId: String?, ownerId: String? = nil) -> FBResult<CreateSessionResponse> {
         // Pre-check quota under lock to avoid creating a WKWebView we'll immediately destroy.
         let admit: Bool = queue.sync {
             if sessions.count >= quota.maxSessions {
@@ -298,7 +304,7 @@ public final class FBSessionManager {
                 return .failure(.quotaExceeded)
             }
             let s = FBSession(id: sid, mode: req.mode, guards: guards,
-                              credentialDomain: req.credentialDomain, webview: wv)
+                              credentialDomain: req.credentialDomain, webview: wv, ownerId: ownerId)
             s.scheduler.reset()
             s.transition(to: .running)
             s.touch() // R-5: mark active at birth so the reaper doesn't close a freshly-created session before its first action.
@@ -346,23 +352,56 @@ public final class FBSessionManager {
         // window where a reaper/teardown path nil'd the webview but has not yet removed the
         // dict entry — and the authoritative gate is the execute-entry re-check (a caller
         // that captured the session just before close flipped the flag).
+        // B-5/E-34: this system accessor SKIPS ownership (CDP ensureSession, tests, teardown).
+        // UDS clients must use get(_:ownerId:) which enforces ownership.
         return queue.sync {
             guard let s = sessions[sid], !s.isClosing else { return nil }
             return s
         }
     }
 
-    public func close(sessionId sid: String, logout: Bool = false) -> FBError? {
+    // B-5/E-34: owner-aware get for UDS clients. Returns .failure(.sessionNotFound) when the
+    // session is absent/closing, .failure(.notOwner) when it exists but belongs to another
+    // client, .success(session) when the caller owns it OR it is system-owned (ownerId nil).
+    // A system-owned session (CDP-created, reaper-created) is operable by any caller — the
+    // ownership model gates client-to-client isolation, not system-to-client.
+    public func get(_ sid: String, ownerId: String?) -> FBResult<FBSession> {
+        return queue.sync {
+            guard let s = sessions[sid], !s.isClosing else { return .failure(.sessionNotFound) }
+            // B-5/E-34: ownership gates client-to-client isolation. A SYSTEM caller
+            // (ownerId nil — teardown, reaper, CDP ensureSession) bypasses the check and
+            // may operate any session. Two non-nil callers must match. A client cannot
+            // operate another client's session; the system always can.
+            if let owner = s.ownerId, let caller = ownerId, owner != caller {
+                log.warn("SessionMgr", "not_owner sid=\(sid) owner=\(owner) caller=\(caller)")
+                return .failure(.notOwner)
+            }
+            return .success(s)
+        }
+    }
+
+    public func close(sessionId sid: String, ownerId: String? = nil, logout: Bool = false) -> FBError? {
         // Extract the session under the lock, then tear down its webview on main
         // WITHOUT holding the queue lock (avoids main<->sessionmgr lock inversion).
-        let s: FBSession? = queue.sync {
-            guard let s = sessions.removeValue(forKey: sid) else { return nil }
+        // B-5/E-34: owner-aware. A caller whose ownerId does not match the session's owner
+        // (and the session is not system-owned) gets .notOwner — the session stays live.
+        // ownerId nil (default) = system caller (teardown, reaper, CDP) — always allowed.
+        let extracted: (FBSession?, FBError?) = queue.sync {
+            guard let s = sessions.removeValue(forKey: sid) else { return (nil, .sessionNotFound) }
+            // B-5/E-34: ownership gates client-to-client. System (ownerId nil — teardown,
+            // reaper, CDP) bypasses and may close any session. Two non-nil callers must match.
+            if let owner = s.ownerId, let caller = ownerId, owner != caller {
+                // Ownership mismatch: put it back, deny. Never tear down another client's session.
+                sessions[sid] = s
+                log.warn("SessionMgr", "close not_owner sid=\(sid) owner=\(owner) caller=\(caller)")
+                return (nil, .notOwner)
+            }
             // L-15: clear the stable pin ONLY when the pinned session itself closes — a later
             // create re-pins on its next successful entry (firstSessionId == nil check).
             if firstSessionId == sid { firstSessionId = nil }
-            return s
+            return (s, nil)
         }
-        guard let s = s else { return .sessionNotFound }
+        guard let s = extracted.0 else { return extracted.1 }
         // D11: default retain Keychain; logout=true deletes.
         // F-12: logout revokes BOTH layers — Keychain (persistent) then the in-memory
         // cookie store (runtime) — BEFORE webview destroy, so the live session cannot

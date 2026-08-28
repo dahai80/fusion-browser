@@ -34,6 +34,15 @@ public struct FBError: Error, Codable, Equatable {
     // H-8: per-client rate limit exceeded. Retryable — the caller should back off and retry
     // (the bucket refills at ratePerSec, so a brief wait re-admits the request).
     public static let rateLimited = FBError(code: "rate_limited", message: "per-client request rate exceeded; retry after backoff", retryable: true)
+    // B-5/E-34: session ownership mismatch. A client may only operate sessions it created
+    // (or system-owned sessions whose ownerId is nil). An authed client operating another
+    // client's session by id is denied. Not retryable — the caller cannot gain ownership.
+    public static let notOwner = FBError(code: "not_owner", message: "session owned by another client", retryable: false)
+    // B-5/E-35: per-client in-flight batch cap exceeded. onReadable bounds the number of
+    // frames processed per read so a single 64KB recv (~2000 small frames) cannot queue
+    // 2000 blocking driver.execute on main. Not retryable as a per-frame denial — the
+    // excess frames are buffered and drained on subsequent reads (lossless backpressure).
+    public static let busy = FBError(code: "busy", message: "per-client in-flight batch cap reached; retry later", retryable: true)
 }
 
 public enum FBResult<T> {

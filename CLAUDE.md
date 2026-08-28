@@ -13,7 +13,7 @@ emitter (T3.3) + visual-grounding fallback via fusion-mlx VLM (T3.4); Phase 4 ad
 FR-04 non-persistence verification (P4-1) + RSS watchdog/OOM self-heal (P4-2) +
 perf benchmark suite (P4-3) + UMA coexistence baseline (P4-4, PRD T1.5) + 1000-action
 long-run no-leak (P4-5). T3.1 (agent-studio 对接) is cross-project: contract doc +
-issue only on this side, code lands in fusion-agent-studio. Build green, 188 tests
+issue only on this side, code lands in fusion-agent-studio. Build green, 198 tests
 pass, end-to-end UDS smoke pass, CDP `:9222` smoke pass, T3.4 verified via real VLM
 smoke, Phase 4 all verified via release binary + Python verify scripts
 (`scripts/verify_nonpersistent.py` / `perf_bench.py` / `uma_coexist.py` /
@@ -29,7 +29,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 188 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 198 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -79,6 +79,10 @@ self-heal, default OFF — sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/
 `mach_task_basic_info.resident_size`, one-shot breach fires drain-all-sessions
 or exit-for-supervisor-restart), `guards` (FR-13 scheduling guards, default
 `maxActions=200`/`taskTimeoutMs=300000`/`repeatActionBreak=3`/`rebuildDepthCap=1`).
+B-5/E-34: session ownership is AUTOMATIC — no config key. Every UDS connection
+mints a UUID owner id at init; `create` records it, `execute`/`close` verify it
+(`not_owner` on mismatch). System callers (nil owner) bypass. E-35 in-flight
+batch cap (`maxBatch=64`) is also fixed, not configurable — a fairness guard.
 E-23: `rebuildDepth` counts ONLY real replays — `handleCrash` checks `isIdempotent`
 FIRST and calls `scheduler.canRebuild()` (which increments) only on the idempotent
 replay branch; a non-idempotent crash (navigate/click/type/evaluate) fails directly
@@ -108,6 +112,7 @@ The six infra modules (each a single file, see README source map):
 - `Config.swift` — FR-08 quota by RAM, FR-13 scheduling guards, watchdog policy
 - `Framing.swift` — FR-09 frame reader, overflow backpressure + B-4 partial-frame arrival timeout
 - `Auth.swift` — FR-10 token + capabilities, EVALUATE origin whitelist
+- `UDSServer.swift` — B-5/E-34 per-connection owner id (UUID) + E-35 per-client in-flight batch cap
 - `ErrorModel.swift` — FR-11 structured `{code,message,retryable}`
 - `Observability.swift` — FR-12 metrics + trace_id + credential audit log
 - `Session.swift` — scheduler: admit / repeat-break / rebuild-depth-cap / idempotent
@@ -124,6 +129,29 @@ The six infra modules (each a single file, see README source map):
   AF_UNIX sockets (confirmed via repro). This is why `UDSServer.swift` is POSIX.
 - **Non-blocking client fd + EAGAIN handling** so one slow client can't block the
   shared accept queue.
+- **B-5/E-34 session ownership: every UDS connection mints a UUID `ownerId` at init
+  (NOT the reusable fd).** `create` records it on the session; `execute` and
+  `close` route through the owner-aware `manager.get(_:ownerId:)` /
+  `manager.close(sessionId:ownerId:)` and deny a mismatch with `not_owner`
+  (distinct from `session_not_found` so callers can audit "not yours" vs "gone").
+  System callers pass `ownerId: nil` and BYPASS ownership — this is load-bearing:
+  `manager.close(sessionId:)` (main teardown), the idle reaper, CDP `ensureSession`,
+  and the existing test helpers all pass the default nil owner, so they must bypass
+  or teardown breaks. The deny check is `if let owner = s.ownerId, let caller =
+  ownerId, owner != caller` — denies ONLY when BOTH the session has an owner AND
+  the caller is non-nil AND they differ. CDP's single-tenant shim leaves owner nil
+  (no per-client isolation). Live-pinned by `scripts/ownership_smoke.py` (two
+  connections: B's execute+close on A's session → `not_owner`; A keeps full control).
+- **B-5/E-35 per-client in-flight batch cap: `onReadable` processes at most
+  `maxBatch=64` frames per read.** A 64KB recv can carry ~2000 small frames; without
+  the cap that queues 2000 blocking `driver.execute` on main in one burst. Excess
+  complete frames buffer in `pendingFrames` and drain on the next readable event
+  (DispatchSourceRead is level-triggered — a still-pending buffer re-fires
+  `onReadable`) plus a `queue.async` re-arm for the remainder: lossless, no frame
+  dropped, just spread across reads instead of monopolizing main. `splitBatch` is a
+  pure static (`inout [Data]`, max) so the bound is unit-testable without a live
+  socket. `FBError.busy` exists for a hard-deny variant but the live path uses the
+  lossless defer (the cap is a fairness guard, not a rejection).
 - **WKWebView completion handlers dispatch to main; never sync-wait on main.**
   `evaluateJSSync`/`screenshotSync` guard `Thread.isMainThread == false` and block
   a background semaphore — calling on main deadlocks (and `swift test` has no main

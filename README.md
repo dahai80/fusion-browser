@@ -62,6 +62,7 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 - FR-08 resource control: dynamic session count / memory budget by physical RAM, over-quota rejected
 - FR-09 flow backpressure: per-client read loop, one socket's large frame does not block others, over-cap dropped; partial-frame arrival timeout (B-4) drops a slow-drip client whose incomplete frame overstays 30s
 - FR-10 auth capability model: shared-secret token, per-action capability check, EVALUATE needs separate capability + origin whitelist
+- B-5/E-34 session ownership: every UDS connection mints a UUID owner id; a client may only execute/close sessions it created (`not_owner` on mismatch), system callers bypass. E-35 per-client in-flight batch cap (`maxBatch=64`) bounds frames-per-read so a flooded socket can't monopolize main
 - FR-11 error model: structured `{code,message,retryable}`, predefined error codes (node_stale/credential_locked/quota_exceeded/evaluate_denied/timeout/replay_limit, etc.)
 - FR-12 observability: metrics (count + latency quantiles) + trace_id full chain + credential append-only audit log
 - FR-13 scheduling guards: max_actions + task_timeout + consecutive-identical-action break + rebuild-depth cap 1
@@ -100,7 +101,7 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 188 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 198 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 

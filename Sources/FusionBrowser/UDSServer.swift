@@ -119,6 +119,17 @@ final class FBClientConnection {
     private let onDone: (FBClientConnection) -> Void
     // H-8: per-client token-bucket rate limiter. nil when disabled (bypass).
     private let rateLimiter: FBRateLimiter?
+    // B-5/E-34: stable per-connection owner id. Minted at init (UUID, not the reusable fd),
+    // recorded on every session this client creates and verified on execute/close. Lets the
+    // route deny a client operating another client's session (not_owner) without trusting fd
+    // reuse or socket identity.
+    private let ownerId: String
+    // B-5/E-35: per-client in-flight batch cap. onReadable bounds the frames processed per
+    // read so a 64KB recv (~2000 small frames) cannot queue 2000 blocking driver.execute on
+    // main in one shot. Excess complete frames are buffered here and drained on subsequent
+    // reads (lossless backpressure — no frame is dropped, just deferred).
+    private var pendingFrames: [Data] = []
+    private let maxBatch: Int
 
     init(fd: Int32, manager: FBSessionManager, driver: FBActionDriver, auth: FBAuth,
          rateLimitConfig: FBRateLimitConfig,
@@ -134,6 +145,11 @@ final class FBClientConnection {
         } else {
             self.rateLimiter = nil
         }
+        self.ownerId = UUID().uuidString
+        // B-5/E-35: bound per-read frame processing. 64 caps a single onReadable to at most
+        // 64 blocking driver.execute on main before deferring; a flood is drained across many
+        // reads rather than monopolizing the shared main-thread webview path in one burst.
+        self.maxBatch = 64
     }
 
     func start() {
@@ -171,7 +187,41 @@ final class FBClientConnection {
         if overflow { send(error: .invalidRequest); readSource?.cancel(); return }
         // B-4/R-6: partial frame overstayed frameTimeoutMs -> drop the slow-drip client.
         if timeout { send(error: .invalidRequest); readSource?.cancel(); return }
-        for frame in frames { handleFrame(frame) }
+        // B-5/E-35: lossless per-read batch cap. Append freshly-decoded frames to the pending
+        // queue, then drain at most maxBatch this turn. Excess frames stay queued and are
+        // drained on the next readable event (the socket is level-triggered via
+        // DispatchSourceRead, so a still-pending buffer re-fires onReadable). No frame is
+        // dropped — a flooding client is simply spread across reads instead of monopolizing
+        // main in one burst.
+        pendingFrames.append(contentsOf: frames)
+        drainPending()
+    }
+
+    // B-5/E-35: process up to maxBatch pending frames per call. Called from onReadable after
+    // appending new frames; also re-invoked inline if the queue still has work (bounded by
+    // maxBatch each pass, so a huge backlog yields between batches rather than looping
+    // unboundedly on one onReadable — the dispatch source will re-fire for the remainder).
+    private func drainPending() {
+        let toProcess = Self.splitBatch(&pendingFrames, max: maxBatch)
+        for frame in toProcess { handleFrame(frame) }
+        if !pendingFrames.isEmpty {
+            log.debug("Client", "batch cap deferred \(pendingFrames.count) frames fd=\(fd)")
+            // Re-arm: schedule another drain pass on this client's serial queue. The queue is
+            // serial so this cannot race onReadable; it just continues the bounded drain.
+            queue.async { [weak self] in self?.drainPending() }
+        }
+    }
+
+    // B-5/E-35: pure slicing primitive — removes and returns up to `max` frames from the
+    // front of `pending`, leaving the rest. Extracted so the batch cap is unit-testable
+    // without a live socket/handleFrame (the bound is the security property; the drain loop
+    // just applies it). A 200-frame flood yields <= max per call, deferring the remainder.
+    static func splitBatch(_ pending: inout [Data], max: Int) -> [Data] {
+        guard max > 0, !pending.isEmpty else { return [] }
+        let take = Swift.min(max, pending.count)
+        let slice = Array(pending.prefix(take))
+        pending.removeFirst(take)
+        return slice
     }
 
     private func handleFrame(_ frame: Data) {
@@ -205,7 +255,7 @@ final class FBClientConnection {
     private func route(_ req: FBRequest) {
         switch req {
         case .createSession(let r):
-            switch manager.create(req: r, traceId: req.traceId) {
+            switch manager.create(req: r, traceId: req.traceId, ownerId: ownerId) {
             case .success(let cr): send(resp: .createSession(cr))
             case .failure(let e): send(error: e)
             }
@@ -218,15 +268,22 @@ final class FBClientConnection {
                 send(error: .rateLimited)
                 return
             }
-            guard let session = manager.get(r.sessionId) else { send(error: .sessionNotFound); return }
-            // H-5: pass the token's actual caps to the driver (authoritative per-action gate).
-            let state = driver.execute(session: session, req: r, caps: caps)
-            send(resp: .state(state))
+            // B-5/E-34: owner-aware get. A client may only execute on sessions it created
+            // (or system-owned sessions). Mismatch -> not_owner (not sessionNotFound, so the
+            // caller can distinguish "doesn't exist" from "not yours" for audit/telemetry).
+            switch manager.get(r.sessionId, ownerId: ownerId) {
+            case .success(let session):
+                // H-5: pass the token's actual caps to the driver (authoritative per-action gate).
+                let state = driver.execute(session: session, req: r, caps: caps)
+                send(resp: .state(state))
+            case .failure(let e): send(error: e)
+            }
         case .close(let sid):
             // F-8: top-level .close must respect .close capability (cross-session DoS
             // if a navigate-only client can tear down any session by id).
             guard caps.contains(.close) else { send(error: .authDenied); return }
-            let err = manager.close(sessionId: sid)
+            // B-5/E-34: owner-aware close. A client cannot tear down another client's session.
+            let err = manager.close(sessionId: sid, ownerId: ownerId)
             if let e = err { send(error: e) }
             else { send(resp: .closed(sessionId: sid)) }
         case .metrics:
