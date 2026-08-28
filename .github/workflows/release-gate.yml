@@ -92,15 +92,20 @@ jobs:
             http://localhost:11434/v1/models >/dev/null 2>&1 \
             || { echo "::warning::fusion-mlx not reachable on :11434 (or key rejected); set SKIP_UMA=1 or start it"; exit 1; }
 
-      - name: Run release gate (build + 198 tests + 9 live harnesses)
+      - name: Run release gate (build + 9 live harnesses)
+        # The deterministic 198-test suite is gated by the build-and-test job
+        # (GitHub-hosted macos-15, unlocked Keychain). This self-hosted job runs
+        # build + the 9 live WKWebView harnesses ONLY. swift test is skipped here
+        # (--skip-tests): the self-hosted runner's xctest subprocess has a
+        # non-interactive Keychain (errSecInteractionNotAllowed on the credential
+        # tests), and the suite is already covered by build-and-test.
         run: |
+          chmod +x scripts/release_gate.sh
           if [[ "$SKIP_UMA" == "1" ]]; then
-            # Drop the one MLX-dependent harness; keep the other 8 live harnesses.
-            chmod +x scripts/release_gate.sh
-            EXCLUDE=scripts/uma_coexist.py
-            # Run the gate harnesses individually, skipping the excluded one.
+            # No fusion-mlx -> drop the one MLX-dependent harness (uma_coexist).
+            # release_gate.sh's HARD list includes uma, so run build + the 8
+            # non-MLX harnesses inline instead of the full gate.
             swift build -c release --disable-sandbox
-            swift test --disable-sandbox
             for h in scripts/verify_nonpersistent.py scripts/navigate_execute_smoke.py \
                      scripts/evaluate_smoke.py scripts/cdp_dom_smoke.py \
                      scripts/cdp_event_smoke.py scripts/metrics_smoke.py \
@@ -108,7 +113,7 @@ jobs:
               [[ -f "$h" ]] && { echo "::group::live: $h"; python3 "$h" || exit 1; echo "::endgroup::"; }
             done
           else
-            scripts/release_gate.sh
+            scripts/release_gate.sh --skip-tests
           fi
 
       - name: Upload harness reports

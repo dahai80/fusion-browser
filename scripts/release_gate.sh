@@ -38,6 +38,12 @@ cd "$(dirname "$0")/.."
 
 SKIP_PERF=0
 [[ "${1:-}" == "--skip-perf" ]] && SKIP_PERF=1
+# --skip-tests: skip stage 2 (swift test). Use on runners where the deterministic
+# suite is already gated by a separate job (e.g. the self-hosted live-path runner,
+# whose Keychain is not interactive for the xctest subprocess -> credential tests
+# would fail with errSecInteractionNotAllowed; build-and-test covers the 198 suite).
+SKIP_TESTS=0
+[[ "${1:-}" == "--skip-tests" ]] && SKIP_TESTS=1
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; RST=$'\033[0m'
 pass() { echo "${GRN}[GATE PASS]${RST} $1"; }
@@ -60,7 +66,11 @@ run_gate() {
 run_gate "swift build -c release" swift build -c release --disable-sandbox
 
 # --- stage 2: deterministic tests (198) ---
-run_gate "swift test (198)" swift test --disable-sandbox
+if [[ "$SKIP_TESTS" -eq 0 ]]; then
+    run_gate "swift test (198)" swift test --disable-sandbox
+else
+    info "stage 2 skipped (--skip-tests): deterministic suite gated elsewhere"
+fi
 
 # --- stage 3: live-path verify harnesses ---
 # These drive the RELEASE binary over UDS. Each harness starts/stops its own binary

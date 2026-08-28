@@ -30,6 +30,16 @@ public final class FBCredentialManager {
             log.warn("Cred", "store rejected: missing name domain=\(domain)")
             return .invalidRequest
         }
+        // A locked / non-interactive Keychain (errSecInteractionNotAllowed, -25308) is a
+        // credential_locked condition, NOT an injection failure. Surface it honestly so
+        // callers can distinguish "engine bug" from "keychain unavailable" — the latter
+        // happens in non-GUI contexts (CI test subprocesses, launchd agents without an
+        // unlocked login keychain). Probe first so SecItemAdd does not mislabel it.
+        if isKeychainLocked() {
+            log.warn("Cred", "store rejected: keychain locked domain=\(domain) name=\(name)")
+            FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "store", result: "locked")
+            return .credentialLocked
+        }
         let acct = accountKey(domain: domain, name: name, path: path)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
