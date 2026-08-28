@@ -97,6 +97,14 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
   `uma_coexist.py`, `longrun_leak.py`) run against the release binary and write
   `scripts/*-report.json` (gitignored). Run them for integration verification;
   clean up process data after, keep only final outputs + logs.
+- **CI release gate (B-6/R-6):** `.github/workflows/release-gate.yml` runs on
+  every PR to main. `build-and-test` (GitHub-hosted `macos-14`) does
+  `swift build -c release` + `swift test --disable-sandbox` (198 deterministic
+  tests). `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]`,
+  needs a GUI session for WKWebView) runs the full `scripts/release_gate.sh` —
+  9 live harnesses. Both are required status checks; failure blocks merge.
+  `uma_coexist` needs fusion-mlx on `:11434` — set repo var `SKIP_UMA=1` to
+  skip it on a runner without MLX.
 - **Rust core parity gate — removed (E-17~20 / #68).** The deleted
   `RustCoreParityTests` + `scripts/parity_smoke.py` compared Rust output vs the
   Swift reducer; with Rust gone there are no Rust bytes to drift. The Swift

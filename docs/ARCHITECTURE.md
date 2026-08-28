@@ -215,3 +215,33 @@ are unchanged; `fusion-cowork` (UDS/CDP consumer, never the Rust core) is
 unaffected. No Rust toolchain needed; `--disable-sandbox` was mandatory only
 because the plugin ran `cargo` and is no longer required.
 
+## 9. CI Release Gate (B-6 / R-6)
+
+`swift test` covers 0% of the WKWebView live path (ARCH-3: no main run loop
+under `swift test` → `evaluateJSSync`/`screenshotSync` semaphores deadlock).
+The live automation surface is verified ONLY by the built release binary +
+the Python harnesses in `scripts/`, wired into `scripts/release_gate.sh`:
+build + 198 deterministic tests + 9 live harnesses (verify_nonpersistent,
+navigate_execute_smoke, evaluate_smoke, cdp_dom_smoke, cdp_event_smoke,
+metrics_smoke, longrun_leak, uma_coexist, ownership_smoke).
+
+`.github/workflows/release-gate.yml` automates this gate on every PR to main
+and every push to main. Two jobs:
+
+- **`build-and-test`** — GitHub-hosted `macos-14` arm64. `swift build -c release`
+  + `swift test --disable-sandbox` (198 deterministic tests). Fast, no GUI
+  needed, runs on a clean cloud runner. Proves the package compiles and the
+  deterministic suite passes.
+- **`live-path-gate`** — self-hosted `[self-hosted, macos, arm64, gui]` runner
+  with a GUI session (WKWebView needs a CoreGraphics display + main run loop).
+  Runs the full `scripts/release_gate.sh` — all 9 live harnesses against the
+  release binary. Depends on `build-and-test`. `uma_coexist` additionally
+  needs fusion-mlx on `:11434` (samples MLX resident memory); set the repo
+  var `SKIP_UMA=1` on a runner without fusion-mlx to drop only that harness
+  (8 of 9 still run). `FUSION_MLX_API_KEY` secret threads the MLX admin key.
+
+Both jobs are required status checks under branch protection — a failure
+blocks PR merge (R-6 验收标准: PR 触发 CI 跑全 gate，绿则可合). Harness
+reports (`scripts/*-report.json`, `*.log`) are uploaded as artifacts for 14
+days so CI history traces are queryable.
+

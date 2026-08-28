@@ -13,7 +13,7 @@
 #
 # Gate stages (each is a hard gate — first failure aborts with non-zero exit):
 #   1. swift build -c release --disable-sandbox   (pure Swift, no plugin)
-#   2. swift test --disable-sandbox               (deterministic unit tests, 188)
+#   2. swift test --disable-sandbox               (deterministic unit tests, 198)
 #   3. live-path verify harnesses against the release binary:
 #        verify_nonpersistent.py  (FR-04 non-persistence)
 #        navigate_execute_smoke.py (create-no-url -> execute navigate -> extract)
@@ -23,6 +23,7 @@
 #        metrics_smoke.py          (R-3/B-3 UDS metrics read path: real counters + p50/p95)
 #        longrun_leak.py           (1000-action no-leak)
 #        uma_coexist.py            (UMA coexistence baseline)
+#        ownership_smoke.py        (B-5/E-34 session ownership: not_owner on cross-client op)
 #      perf_bench.py is informational (perf, not correctness), NOT a hard gate —
 #      runs last and its failure is logged but non-fatal.
 #
@@ -73,6 +74,7 @@ HARD_HARNESSES=(
     "scripts/metrics_smoke.py"
     "scripts/longrun_leak.py"
     "scripts/uma_coexist.py"
+    "scripts/ownership_smoke.py"
 )
 for h in "${HARD_HARNESSES[@]}"; do
     if [[ -f "$h" ]]; then

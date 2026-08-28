@@ -1,0 +1,107 @@
+name: release-gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# R-6 / B-6: CI regression gate for the live WKWebView path.
+#
+# ARCH-3: WKWebView completion handlers dispatch to main; under `swift test` there is
+# no main run loop, so evaluateJSSync/screenshotSync semaphores deadlock. The 198 unit
+# tests are deterministic (no live webview). The live automation surface is verified
+# ONLY by the built release binary + the Python harnesses in scripts/ (release_gate.sh).
+#
+# Two jobs:
+#   build-and-test  — GitHub-hosted macOS-14 arm64. swift build + swift test (198).
+#                     Fast, reliable, no special runner. Proves the package compiles
+#                     and deterministic tests pass on a clean machine.
+#   live-path-gate  — self-hosted macOS runner with a GUI session (WKWebView needs a
+#                     CoreGraphics display + main run loop to navigate/evaluate/screenshot)
+#                     AND a running fusion-mlx inference engine (uma_coexist samples
+#                     MLX resident memory). Runs the full scripts/release_gate.sh.
+#                     Required: runner labeled [self-hosted, macos, arm64, gui]. On a
+#                     runner without fusion-mlx, set SKIP_UMA=1 to drop the one MLX
+#                     harness (the other 8 live harnesses need only the GUI session).
+#
+# Both jobs must pass to merge a PR (branch protection: required status check =
+# "build-and-test" + "live-path-gate"). Failures block merge per the R-6 验收标准.
+
+jobs:
+  build-and-test:
+    name: build + unit tests (deterministic)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app || true
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build (release)
+        run: swift build -c release --disable-sandbox
+
+      - name: Unit tests (198, deterministic — no live WKWebView)
+        run: swift test --disable-sandbox
+
+  live-path-gate:
+    name: live WKWebView path (release_gate.sh)
+    needs: build-and-test
+    # Self-hosted macOS runner with a GUI session. WKWebView cannot run headless on a
+    # CoreGraphics-less CI box; a GitHub-hosted runner has no persistent GUI session
+    # for a long-lived binary driving real navigations. Label set:
+    #   self-hosted + macos + arm64 + gui
+    runs-on: [self-hosted, macos, arm64, gui]
+    timeout-minutes: 45
+    env:
+      # fusion-mlx API key for uma_coexist. On the self-hosted runner this is set in
+      # the runner's env or Actions secrets. If the runner has no fusion-mlx, set
+      # SKIP_UMA=1 to drop only the MLX harness (7 of 8 live harnesses still run).
+      SKIP_UMA: ${{ vars.SKIP_UMA || '0' }}
+      FUSION_MLX_API_KEY: ${{ secrets.FUSION_MLX_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Ensure fusion-mlx reachable (uma_coexist precondition)
+        if: env.SKIP_UMA != '1'
+        run: |
+          curl -sf http://localhost:11434/v1/models >/dev/null 2>&1 \
+            || { echo "::warning::fusion-mlx not reachable on :11434; set SKIP_UMA=1 or start it"; exit 1; }
+
+      - name: Run release gate (build + 198 tests + 9 live harnesses)
+        run: |
+          if [[ "$SKIP_UMA" == "1" ]]; then
+            # Drop the one MLX-dependent harness; keep the other 8 live harnesses.
+            chmod +x scripts/release_gate.sh
+            EXCLUDE=scripts/uma_coexist.py
+            # Run the gate harnesses individually, skipping the excluded one.
+            swift build -c release --disable-sandbox
+            swift test --disable-sandbox
+            for h in scripts/verify_nonpersistent.py scripts/navigate_execute_smoke.py \
+                     scripts/evaluate_smoke.py scripts/cdp_dom_smoke.py \
+                     scripts/cdp_event_smoke.py scripts/metrics_smoke.py \
+                     scripts/longrun_leak.py scripts/ownership_smoke.py; do
+              [[ -f "$h" ]] && { echo "::group::live: $h"; python3 "$h" || exit 1; echo "::endgroup::"; }
+            done
+          else
+            scripts/release_gate.sh
+          fi
+
+      - name: Upload harness reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-path-reports
+          path: |
+            scripts/*-report.json
+            scripts/*.log
+          if-no-files-found: ignore
+          retention-days: 14

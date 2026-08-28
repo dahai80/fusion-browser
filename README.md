@@ -144,6 +144,8 @@ P4-2 RSS self-restart enable example:
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 
+`scripts/release_gate.sh` wires build + the 198 deterministic tests + 9 live harnesses into one PASS/FAIL gate. B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-14` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it). Both jobs are required status checks — failure blocks merge.
+
 Visual-grounding enable example (incremental `~/.fusion-browser/config.json`):
 ```json
 {"visualLocator":{"endpoint":"http://127.0.0.1:11434","model":"mlx-community--Qwen2.5-VL-7B-Instruct-4bit","timeoutMs":30000,"enabled":true}}

@@ -101,6 +101,8 @@ P4-2 RSS 自重启启用示例：
 
 均驱动 release 二进制（`swift build -c release` 后执行），live WKWebView 不在 `swift test` 覆盖范围。
 
+`scripts/release_gate.sh` 把 build + 198 确定性测试 + 9 个活脚本串成一个 PASS/FAIL 门。B-6/R-6 CI：`.github/workflows/release-gate.yml` 每个 PR 触发——`build-and-test` 跑在 GitHub-hosted `macos-14` runner，`live-path-gate` 跑在 self-hosted `[self-hosted, macos, arm64, gui]` runner（WKWebView 需 GUI session；`uma_coexist` 需 `:11434` 上的 fusion-mlx，设 `SKIP_UMA=1` 可跳过）。两个 job 均为必需状态检查——失败阻断合入。
+
 视觉定位启用示例（`~/.fusion-browser/config.json` 增量）：
 ```json
 {"visualLocator":{"endpoint":"http://127.0.0.1:11434","model":"mlx-community--Qwen2.5-VL-7B-Instruct-4bit","timeoutMs":30000,"enabled":true}}
