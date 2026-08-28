@@ -19,7 +19,8 @@ SOCK = "/tmp/fusion-browser-interop.sock"
 TOKEN = "interop-token"
 CONFIG = os.path.expanduser("~/.fusion-browser/config.json")
 BIN = os.path.join(os.path.dirname(__file__), "..", ".build", "release", "fusion-browser")
-AGENT_STUDIO = "/Users/dahai/fusion/fusion-agent-studio"
+AGENT_STUDIO = os.environ.get(
+    "AGENT_STUDIO_PATH", os.path.expanduser("~/fusion/fusion-agent-studio"))
 
 # agent-studio BrowserTool reads BROWSER_CONFIG_PATH for browser_available();
 # the connection itself uses _load_config (socketPath + authToken).
