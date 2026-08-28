@@ -67,6 +67,12 @@ jobs:
       SKIP_UMA: ${{ vars.SKIP_UMA || '0' }}
       FUSION_MLX_API_KEY: ${{ secrets.FUSION_MLX_API_KEY }}
     steps:
+      - name: Route git over SSH (HTTPS to github.com blocked on runner host)
+        # The self-hosted runner host cannot reach github.com:443 (HTTPS times out),
+        # but port 22 (SSH) works with the runner user's existing SSH key. Rewrite
+        # https://github.com/ -> git@github.com: so actions/checkout's fetch uses SSH.
+        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
+
       - uses: actions/checkout@v4
 
       - name: Swift version
