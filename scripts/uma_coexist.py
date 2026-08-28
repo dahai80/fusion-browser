@@ -27,7 +27,20 @@ TOKEN = "uma-token"
 BIN = os.path.join(os.path.dirname(__file__), "..", ".build", "release", "fusion-browser")
 CONFIG = os.path.expanduser("~/.fusion-browser/config.json")
 MLX = "http://localhost:11434"
-MLX_KEY = "dahai168"
+# Resolve the MLX API key the same way start.sh does: FUSION_MLX_API_KEY env
+# var first, else settings.json auth.api_key. A hardcoded key silently 401s
+# when the operator rotates it (env var is the source of truth on this host).
+def _resolve_mlx_key():
+    env = os.environ.get("FUSION_MLX_API_KEY")
+    if env:
+        return env
+    settings = os.path.expanduser("~/.fusion-mlx/settings.json")
+    try:
+        with open(settings) as f:
+            return json.load(f).get("auth", {}).get("api_key", "")
+    except Exception:
+        return ""
+MLX_KEY = _resolve_mlx_key()
 MLX_MODEL = "mlx-community-Llama-3.2-1B-Instruct-4bit"
 OUT = os.path.join(os.path.dirname(__file__), "uma-report.json")
 N_SESSIONS = 10
@@ -112,11 +125,19 @@ def main():
         send(s, {"type": "auth", "token": TOKEN})
         assert recv(s).get("type") == "auth_ack"
 
-        # pre-sample: browser RSS + mlx memory + inference baseline
+        # pre-sample: browser RSS + mlx memory + inference baseline.
+        # WARM the model with one ping BEFORE sampling mem0: MLX lazy-loads a
+        # model on first inference, so a cold MLX reports mem0=0 and the
+        # legitimate 0 -> resident load would trip the monotonic-rise check.
+        # The UMA concern is memory NOT rising under sustained browser load
+        # AFTER the model is resident — anchor mem0 to the resident size.
         rss0 = host_rss_kb(proc.pid)
-        mem0 = mlx_metric("fusion_mlx_model_memory_bytes")
         mlx_ok0 = mlx_ping()
+        mem0 = mlx_metric("fusion_mlx_model_memory_bytes")
         requests0 = mlx_metric("fusion_mlx_requests_total")
+        if mem0 is not None and mem0 == 0:
+            print(f"[uma] NOTE: mlx model memory=0 after warm ping (model not resident); "
+                  f"stability check will be skipped (unmeasurable baseline)")
 
         # build a base64 data URL with 4 distinct interactive targets (rotate
         # per click to dodge FR-13 repeat-action-break).
@@ -193,8 +214,12 @@ def main():
         rss_ok = rss_delta < rss_cap
         mem_delta = (mem_end - mem0) if (mem0 is not None and mem_end is not None) else None
         # mlx memory must not rise monotonically under browser load (allow small
-        # float jitter). cap 5%.
-        mem_ok = (mem_delta is None) or (abs(mem_delta) < mem0 * 0.05)
+        # float jitter). cap 5%. Skip when the baseline is unmeasurable: a cold
+        # MLX that never resident-loaded the model reports mem0=0 even after the
+        # warm ping, so a 5%-of-0 threshold (==0) would flag the legitimate
+        # first-load as a leak. mem0>0 means the model IS resident at baseline
+        # -> the rise-under-load check is meaningful.
+        mem_ok = (mem_delta is None) or (mem0 == 0) or (abs(mem_delta) < mem0 * 0.05)
         mlx_served = (requests_end is not None and requests0 is not None and requests_end >= requests0 + 2)
 
         report.update({
