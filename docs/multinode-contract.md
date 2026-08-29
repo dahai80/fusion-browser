@@ -8,12 +8,22 @@ this side exposes the capacity plane only.
 
 ## The capacity query
 
-UDS request, capability-gated behind `.metrics` (read-only resource info; an operator
-exposing metrics already exposes resource shape — reusing the cap, no new cap minted).
-System caller (no per-client owner needed — read-only).
+UDS request, **auth-gated like every UDS op** (FR-10/H-5 fail-closed): the client MUST
+send an auth frame and receive `auth_ack` before any request frame, or the node returns
+`auth_denied`. The scheduler (fusion-gateway) must hold each node's `authToken` and send
+`{type:"auth", token:<nodeToken>}` on each per-call dial — fusion-browser closes the
+connection after one request-response, so there is no pooled authenticated session;
+re-auth on every dial. After auth, capability-gated behind `.metrics` (read-only resource
+info; an operator exposing metrics already exposes resource shape — reusing the cap, no
+new cap minted). "System caller (no per-client owner needed)" means the B-5/E-34 session-
+ownership check is bypassed for this read-only query — it does NOT mean auth is skipped.
 
 ```jsonc
-// request frame (length-prefixed JSON, snake_case)
+// auth handshake — REQUIRED first frame on every dial (before any request)
+// request:  { "type": "auth", "token": "<node authToken>" }
+// response: { "type": "auth_ack" }
+//   any other response, incl. {type:"error",payload:{code:"auth_denied"}}, = stop
+// request frame (length-prefixed JSON, snake_case) — only after auth_ack
 { "type": "capacity" }
 
 // response frame
@@ -38,7 +48,12 @@ System caller (no per-client owner needed — read-only).
 
 ## Placement contract (scheduler side — fusion-gateway)
 
-1. **Read**: query `{type:"capacity"}` on each known node.
+1. **Read**: on each known node, dial the UDS, send the **auth frame first**
+   (`{type:"auth", token:<nodeToken>}`, expect `auth_ack`), THEN query
+   `{type:"capacity"}`. The node's `authToken` is operator-configured per node; the
+   scheduler must be configured with each node's token (a node with a token it does not
+   know cannot be polled — fail-closed). Without the auth frame the node returns
+   `auth_denied` and the node is NOT polled.
 2. **Pick**: choose a node with headroom — `live_sessions < max_sessions` AND
    `free_memory_mb` adequate. Prefer most-free-memory for headroom; fall back to
    fewest-live-sessions when `free_memory_mb == 0` (probe failure — treat as unknown,
@@ -89,3 +104,15 @@ System caller (no per-client owner needed — read-only).
 fusion-gateway cross-node scheduling + migration: tracked in fusion-gateway
 (issue → PR → landed code, per monorepo rule). This contract doc is the input;
 the gateway implementation consumes `{type:"capacity"}` for placement.
+
+> **Auth-handshake defect (2026-08-30, filed).** fusion-gateway PR #131 (issue #130)
+> landed the scheduler + proxy but its `NodeClient` dials and sends the request frame
+> WITHOUT the required auth handshake, and `BrowserNodeConfig` carries no node token.
+> Against a real fusion-browser node every op returns `auth_denied` → the poll marks
+> the node dead → the registry is empty → `POST /v1/browser/sessions` returns 503.
+> The gateway's offline `fakenode` tests did not model auth, so CI stayed green while
+> the live path is broken. Fix (fusion-gateway-side): add `token` to
+> `BrowserNodeConfig`, send `{type:"auth",token}` + await `auth_ack` before each
+> request on the per-call dial (create/execute/close/capacity/metrics all need it).
+> This contract doc was corrected on 2026-08-30 to state the auth prerequisite
+> (the earlier draft omitted it, which is what misled the gateway implementation).
