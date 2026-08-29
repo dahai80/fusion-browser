@@ -14,8 +14,19 @@ func loadConfig() -> FBEngineConfig {
     // started with authToken=nil (denies ALL UDS) or cdpEnabled=false (CDP silently off),
     // burning hours before anyone noticed. Rule 12: fail visibly. Decode error -> exit(1)
     // + stderr so the operator sees the exact parse failure immediately, not a green log.
-    let home = NSHomeDirectory()
-    let path = "\(home)/.fusion-browser/config.json"
+    // H-9: FUSION_BROWSER_CONFIG env override — NSHomeDirectory() on macOS ignores the
+    // HOME env var (returns the real user home from the pwd DB), so multi-node test/CI
+    // isolation cannot use HOME. The env override lets a harness (scripts/multinode_smoke.py,
+    // the self-hosted runner) point each binary at its own config without touching the
+    // operator's ~/.fusion-browser. Honored BEFORE the default path so an explicit override
+    // wins; absent -> falls through to the default ~/.fusion-browser/config.json.
+    let path: String
+    if let envCfg = ProcessInfo.processInfo.environment["FUSION_BROWSER_CONFIG"], !envCfg.isEmpty {
+        path = envCfg
+    } else {
+        let home = NSHomeDirectory()
+        path = "\(home)/.fusion-browser/config.json"
+    }
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
         log.info("Main", "no config file, using defaults")
         return FBEngineConfig.default

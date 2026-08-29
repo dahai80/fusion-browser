@@ -36,7 +36,7 @@ public final class FBCredentialManager {
         // happens in non-GUI contexts (CI test subprocesses, launchd agents without an
         // unlocked login keychain). Probe first so SecItemAdd does not mislabel it.
         if isKeychainLocked() {
-            log.warn("Cred", "store rejected: keychain locked domain=\(domain) name=\(name)")
+            log.warn("Cred", "store rejected: keychain locked domain=\(domain) name=<masked>")
             FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "store", result: "locked")
             return .credentialLocked
         }
@@ -52,7 +52,7 @@ public final class FBCredentialManager {
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(add as CFDictionary, nil)
         if status != errSecSuccess {
-            log.error("Cred", "store failed for domain=\(domain) name=\(name) path=\(path) status=\(status)")
+            log.error("Cred", "store failed for domain=\(domain) name=<masked> path=\(path) status=\(status)")
             return .credentialInjected
         }
         FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "store", result: "ok")
@@ -158,6 +158,31 @@ public final class FBCredentialManager {
         FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "logout",
                                             result: deletedAny ? "ok" : "fail")
         log.info("Cred", "logout domain=\(domain) deleted=\(deletedAny)")
+    }
+
+    // E-14: per-cookie delete — removes ONLY the single Keychain item for this domain|name|path.
+    // The session logout path MUST use this, not delete(domain:), so session A's logout does not
+    // clobber session B's cookies when both share a credentialDomain (F-10 keys are per-cookie,
+    // so a domain may hold cookies from several sessions). audit op="logout_cookie" (distinct
+    // from the bulk "logout"). Never logs the cookie name (E-39 — name reveals auth-token identity).
+    public func delete(domain: String, cookieAttrs: [String: String]) -> Bool {
+        let name = cookieAttrs["name"] ?? ""
+        let path = cookieAttrs["path"] ?? "/"
+        guard !name.isEmpty else {
+            log.warn("Cred", "logout_cookie skip: missing name domain=\(domain)")
+            return false
+        }
+        let acct = accountKey(domain: domain, name: name, path: path)
+        let del: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: acct
+        ]
+        let ok = SecItemDelete(del as CFDictionary) == errSecSuccess
+        FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "logout_cookie",
+                                            result: ok ? "ok" : "fail")
+        log.info("Cred", "logout_cookie domain=\(domain) deleted=\(ok)")
+        return ok
     }
 
     private func isKeychainLocked() -> Bool {

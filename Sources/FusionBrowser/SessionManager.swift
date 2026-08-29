@@ -24,6 +24,11 @@ public final class FBSession {
     public let scheduler: FBScheduler
     public let credentialDomain: String?
     public var credentialInjected: Bool
+    // E-14: the per-cookie attrs injected at create (one entry per Keychain cookie this
+    // session pulled + injected). The logout path deletes ONLY these (by domain|name|path),
+    // not the whole domain, so session A's logout never clobbers session B's same-domain
+    // cookies. Populated in SessionManager.create as each injectCookies succeeds.
+    public var injectedCookieAttrs: [[String: String]] = []
     // B-5/E-34: the client connection that created this session. nil = system-owned
     // (CDP ensureSession, manager teardown, tests) — system-owned sessions are operable
     // by any caller. A non-nil owner restricts execute/close to that same owner id; a
@@ -262,6 +267,7 @@ public final class FBSessionManager {
         // F-10: a domain may have multiple cookies (per-cookie Keychain keys); inject all.
         // F-11: injected reflects the truthful per-cookie result (was unconditionally true).
         var injected = false
+        var injectedAttrs: [[String: String]] = []
         if let domain = req.credentialDomain, !domain.isEmpty {
             let (all, err) = creds.retrieveAll(domain: domain)
             if let e = err {
@@ -271,7 +277,10 @@ public final class FBSessionManager {
             } else {
                 var okCount = 0
                 for attrs in all {
-                    if wv.injectCookies(attrs, domain: domain) { okCount += 1 }
+                    if wv.injectCookies(attrs, domain: domain) {
+                        okCount += 1
+                        injectedAttrs.append(attrs)
+                    }
                 }
                 injected = okCount > 0
                 log.info("SessionMgr", "cred injected domain=\(domain) ok=\(okCount)/\(all.count)")
@@ -305,6 +314,7 @@ public final class FBSessionManager {
             }
             let s = FBSession(id: sid, mode: req.mode, guards: guards,
                               credentialDomain: req.credentialDomain, webview: wv, ownerId: ownerId)
+            s.injectedCookieAttrs = injectedAttrs
             s.scheduler.reset()
             s.transition(to: .running)
             s.touch() // R-5: mark active at birth so the reaper doesn't close a freshly-created session before its first action.
@@ -407,7 +417,25 @@ public final class FBSessionManager {
         // cookie store (runtime) — BEFORE webview destroy, so the live session cannot
         // be re-authenticated from either layer. Order is Keychain-delete → clearCookies
         // → destroy, closing the delete/destroy TOCTOU window the audit flagged.
-        if logout, let domain = s.credentialDomain { creds.delete(domain: domain) }
+        // E-14: delete ONLY the cookies THIS session injected at create (by domain|name|path),
+        // not the whole domain. Keychain is shared per-credentialDomain, so a domain may hold
+        // cookies from several sessions (F-10 per-cookie keys); a bulk delete(domain:) would
+        // clobber session B's same-domain cookies when session A logs out. injectedCookieAttrs
+        // is captured in the create inject loop, so A's logout deletes only A's cookies. If the
+        // list is empty (no inject, or pre-E-14 sessions) fall back to bulk delete for the
+        // D11「彻底注销」 semantics — honest degradation, never silently leaves credentials.
+        if logout, let domain = s.credentialDomain {
+            if s.injectedCookieAttrs.isEmpty {
+                log.warn("SessionMgr", "logout fallback bulk domain=\(domain) (no captured inject attrs)")
+                creds.delete(domain: domain)
+            } else {
+                var removed = 0
+                for attrs in s.injectedCookieAttrs {
+                    if creds.delete(domain: domain, cookieAttrs: attrs) { removed += 1 }
+                }
+                log.info("SessionMgr", "logout per-cookie domain=\(domain) removed=\(removed)/\(s.injectedCookieAttrs.count)")
+            }
+        }
         if logout, let wv = s.webview { wv.clearCookies() }
         s.close()
         log.info("SessionMgr", "closed \(sid) logout=\(logout)")
@@ -415,6 +443,16 @@ public final class FBSessionManager {
     }
 
     public func count() -> Int { return queue.sync { sessions.count } }
+
+    // H-9: live capacity snapshot for THIS node — the scheduler-placement input. Reads
+    // the live session count under the queue lock (consistent with count()), then builds
+    // FBNodeCapacity from the configured quota. Exposed via the UDS `{type:"capacity"}`
+    // request (gated behind .metrics cap in UDSServer). nodeId is minted once per process
+    // (FBNodeCapacity.processNodeId), freeMemoryMB probed live each call.
+    public func capacity() -> FBNodeCapacity {
+        let live = queue.sync { sessions.count }
+        return FBNodeCapacity.current(quota: quota, liveSessions: live)
+    }
 
     public func listIds() -> [String] { return queue.sync { Array(sessions.keys) } }
 

@@ -55,6 +55,35 @@ fired) + Flow B fill (`getDocument` → `querySelector('#u')` → `focus` →
 `insertText('hello')` → `Runtime.evaluate` value == `'hello'`). R-7 gate
 green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 
+**Enterprise-commercial gap wave landed (2026-08-29)** — closes the four items the
+0828 product audit's enterprise tier flagged beyond the 6 blockers:
+- **H-9 multi-node capacity plane** — per-node identity (`FBNodeCapacity.nodeId`, a
+  process-lifetime UUID) + a UDS `{type:"capacity"}` route (gated behind `.metrics` cap)
+  reporting `maxSessions` / `liveSessions` / `freeMemoryMB` / `ramGB` for an external
+  scheduler's placement query. No in-process scheduler (audit R-10 改法: cross-node
+  scheduling/migration lands in fusion-gateway; this side ships the contract +
+  `docs/multinode-contract.md` + fusion-gateway issue). Pinned by
+  `scripts/multinode_smoke.py` (3 binaries, distinct nodeIds) + `NodeCapacityTests`.
+- **R-7 10-page AXTree compression SLA** — versioned corpus at `Tests/fixtures/pages/`
+  (10 real-structure HTML fixtures: login/dashboard/SPA-list/heavy-table/heavy-form/
+  heavy-nav/deep-nest/shadow-DOM/hidden-injection/long-article). `scripts/perf_multipage.py`
+  measures the PRD §1.1 SLA with the correct metric: **tiktoken tokens** (cl100k_base),
+  gates = **P50 compression ≥90%** (median, not per-page) AND **P95 AXTree node-body
+  tokens ≤1500**. Header excluded (base64 data-URL fixtures inflate the url line ~1500
+  tokens; real http URLs add ~10). PASS: P50=0.926, P95=407. Hard gate in
+  `release_gate.sh` (live-path only). Shadow-DOM fixture honestly excluded only if the
+  walker extracts 0 nodes (it reaches light-tree nodes — scored, not excluded).
+- **R-8 sanitizer combination-variant fuzz** — `InjectionFuzzTests` exercises all 2^11
+  subsets of `FBSanitizer.hiddenRules` (each subset classifies hidden + matches exactly),
+  render+static combinations, and adversarial-naming near-misses (zero false-positive on
+  exact-string contract). Pure deterministic — fits `swift test`.
+- **Credential P2** — E-14 logout deletes only THIS session's injected cookies (by
+  name|path) not the whole domain (two same-domain sessions no longer clobber); E-27
+  `setCookie` uses the completion-handler overload + off-main wait (returns true only
+  after commit, not before); E-39 cookie `name` masked in os_log (was a `%{public}` leak
+  of auth-token identity).
+Build green, **210 tests pass** (198 + NodeCapacity + InjectionFuzz + E-14 credential).
+
 **Phase 1 landed**
 - Swift 6 SPM package, Headless/Headed WKWebView wrapper (`nonPersistent` dataStore isolation; WebContent process count bounded by the session cap + WebKit per-site isolation, not a shared pool — `WKProcessPool` deprecated macOS 12+, removed per B-2)
 - UDS server (POSIX socket + `DispatchSourceRead`, bypassing the unreliable `NWListener` AF_UNIX accept)
@@ -101,7 +130,7 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 198 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 210 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 

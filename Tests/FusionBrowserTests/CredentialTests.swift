@@ -57,6 +57,48 @@ final class CredentialHostingTests: XCTestCase {
         XCTAssertEqual(err?.code, "credential_not_found")
     }
 
+    // E-14: per-cookie delete removes ONLY the named cookie, not the whole domain.
+    // Two cookies share a domain (different name|path — F-10 keys); deleting one must
+    // leave the other intact. This is the session-logout contract: session A's logout
+    // (which injected only cookie A) must not clobber session B's cookie B. A bulk
+    // delete(domain:) would remove both; the per-cookie overload removes one.
+    func testPerCookieDeleteLeavesOtherCookieIntact() {
+        let cookieA: [String: String] = ["name": "sessA", "value": "valA", "domain": domain, "path": "/"]
+        let cookieB: [String: String] = ["name": "csrfB", "value": "valB", "domain": domain, "path": "/admin"]
+        XCTAssertNil(mgr.store(domain: domain, cookieAttrs: cookieA))
+        XCTAssertNil(mgr.store(domain: domain, cookieAttrs: cookieB))
+
+        // Both present.
+        let (all0, _) = mgr.retrieveAll(domain: domain)
+        XCTAssertEqual(all0.count, 2, "both cookies stored under shared domain")
+
+        // Delete ONLY cookieA by attrs.
+        XCTAssertTrue(mgr.delete(domain: domain, cookieAttrs: cookieA), "per-cookie delete reports ok")
+
+        // cookieB survives.
+        let (all1, err1) = mgr.retrieveAll(domain: domain)
+        XCTAssertNil(err1)
+        XCTAssertEqual(all1.count, 1, "other cookie survived the per-cookie delete")
+        XCTAssertEqual(all1.first?["name"], "csrfB")
+
+        // Delete cookieB by attrs.
+        XCTAssertTrue(mgr.delete(domain: domain, cookieAttrs: cookieB))
+
+        // Both gone — retrieveAll returns an empty array + credential_not_found.
+        let (all2, err2) = mgr.retrieveAll(domain: domain)
+        XCTAssertTrue(all2.isEmpty)
+        XCTAssertEqual(err2?.code, "credential_not_found")
+    }
+
+    // E-14: per-cookie delete with a missing name is a safe no-op (returns false), never
+    // a silent bulk delete.
+    func testPerCookieDeleteMissingNameIsNoOp() {
+        XCTAssertNil(mgr.store(domain: domain, cookieAttrs: ["name": "keep", "value": "v"]))
+        XCTAssertFalse(mgr.delete(domain: domain, cookieAttrs: ["path": "/"]), "missing name does not delete")
+        let (all, _) = mgr.retrieveAll(domain: domain)
+        XCTAssertEqual(all.count, 1, "cookie survived the missing-name no-op")
+    }
+
     // T2.4: audit log records the inject op with NO plaintext value anywhere.
     func testAuditLogHasNoPlaintext() {
         XCTAssertNil(mgr.store(domain: domain, cookieAttrs: ["name": "sess", "value": "plaintext-secret-xyz"]))

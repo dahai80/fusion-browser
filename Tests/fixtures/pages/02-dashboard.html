@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard — Acme Cloud</title>
+<style>
+:root{--primary:#2563eb;--bg:#f1f5f9;--surface:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0;--green:#16a34a;--red:#dc2626;--amber:#d97706}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+.app{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+.sidebar{background:#0f172a;color:#cbd5e1;padding:20px 16px}
+.sidebar .brand{display:flex;align-items:center;gap:10px;margin-bottom:28px;color:#fff;font-weight:600;font-size:16px}
+.sidebar .logo{width:30px;height:30px;border-radius:6px;background:var(--primary);display:grid;place-items:center}
+.sidebar nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:6px;color:#cbd5e1;text-decoration:none;font-size:14px;margin-bottom:2px;transition:background .15s}
+.sidebar nav a:hover{background:#1e293b}
+.sidebar nav a.active{background:var(--primary);color:#fff}
+.main{padding:24px 32px;overflow:auto}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+.topbar h1{font-size:22px;font-weight:600}
+.topbar .actions{display:flex;gap:8px}
+.btn{height:36px;padding:0 16px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn.ghost{background:transparent}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px}
+.stat .label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.stat .val{font-size:26px;font-weight:600;margin:6px 0}
+.stat .delta{font-size:12px}
+.delta.up{color:var(--green)}.delta.down{color:var(--red)}
+.cards{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px}
+.card h2{font-size:16px;font-weight:600;margin-bottom:16px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+table th{text-align:left;font-weight:500;color:var(--muted);padding:8px 12px;border-bottom:1px solid var(--border)}
+table td{padding:10px 12px;border-bottom:1px solid var(--border)}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500}
+.tag.ok{background:#dcfce7;color:var(--green)}.tag.warn{background:#fef3c7;color:var(--amber)}.tag.fail{background:#fee2e2;color:var(--red)}
+.user{display:flex;align-items:center;gap:10px}
+.avatar{width:32px;height:32px;border-radius:50%;background:var(--primary);color:#fff;display:grid;place-items:center;font-size:13px;font-weight:600}
+.list-item{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
+.list-item:last-child{border:none}
+.list-item .meta{font-size:13px}
+.list-item .meta small{color:var(--muted)}
+.search{position:relative}
+.search input{height:36px;width:280px;padding:0 12px 0 34px;border:1px solid var(--border);border-radius:8px;font-size:14px}
+.search svg{position:absolute;left:10px;top:9px;color:var(--muted)}
+.menu-btn{position:relative;background:none;border:none;cursor:pointer;padding:6px;border-radius:6px}
+.menu-btn:hover{background:var(--bg)}
+.dropdown{position:absolute;right:0;top:44px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.08);min-width:180px;display:none;z-index:10}
+.dropdown.open{display:block}
+.dropdown a{display:block;padding:8px 14px;color:var(--text);text-decoration:none;font-size:13px}
+.dropdown a:hover{background:var(--bg)}
+.empty{color:var(--muted);text-align:center;padding:24px;font-size:13px}
+@media(max-width:1024px){.grid{grid-template-columns:repeat(2,1fr)}.cards{grid-template-columns:1fr}.app{grid-template-columns:1fr}.sidebar{display:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="logo">A</div>Acme Cloud</div>
+    <nav>
+      <a id="nav-overview" href="/app" class="active">Overview</a>
+      <a id="nav-projects" href="/projects">Projects</a>
+      <a id="nav-billing" href="/billing">Billing</a>
+      <a id="nav-team" href="/team">Team</a>
+      <a id="nav-settings" href="/settings">Settings</a>
+      <a id="nav-docs" href="/docs">Docs</a>
+    </nav>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <h1>Overview</h1>
+      <div class="actions">
+        <div class="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="search" type="search" placeholder="Search…">
+        </div>
+        <button class="btn ghost" id="btn-notif" title="Notifications">Notifications</button>
+        <button class="btn primary" id="btn-new">New project</button>
+        <button class="menu-btn" id="btn-menu">Account ▾
+          <div class="dropdown" id="dd-menu">
+            <a id="menu-profile" href="/settings/profile">Profile</a>
+            <a id="menu-billing" href="/billing">Billing</a>
+            <a id="menu-signout" href="/logout">Sign out</a>
+          </div>
+        </button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="stat"><div class="label">Revenue</div><div class="val">$48,250</div><div class="delta up">▲ 12.4%</div></div>
+      <div class="stat"><div class="label">Active users</div><div class="val">3,842</div><div class="delta up">▲ 4.1%</div></div>
+      <div class="stat"><div class="label">Churn</div><div class="val">2.3%</div><div class="delta down">▼ 0.8%</div></div>
+      <div class="stat"><div class="label">MRR</div><div class="val">$12,100</div><div class="delta up">▲ 7.2%</div></div>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <h2>Recent projects</h2>
+        <table>
+          <thead><tr><th>Name</th><th>Owner</th><th>Status</th><th>Updated</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>Atlas migration</td><td class="user"><span class="avatar">SK</span> Sara Kim</td><td><span class="tag ok">Active</span></td><td>2h ago</td><td><button class="btn ghost" id="open-1">Open</button></td></tr>
+            <tr><td>Mobile redesign</td><td class="user"><span class="avatar">JD</span> Jay Doe</td><td><span class="tag warn">Review</span></td><td>1d ago</td><td><button class="btn ghost" id="open-2">Open</button></td></tr>
+            <tr><td>Billing v2</td><td class="user"><span class="avatar">ML</span> Mei Lin</td><td><span class="tag ok">Active</span></td><td>3d ago</td><td><button class="btn ghost" id="open-3">Open</button></td></tr>
+            <tr><td>API docs</td><td class="user"><span class="avatar">RA</span> Raj Anand</td><td><span class="tag fail">Blocked</span></td><td>5d ago</td><td><button class="btn ghost" id="open-4">Open</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h2>Activity</h2>
+        <div class="list-item"><div class="meta">Sara merged PR #842 <small>Atlas migration</small></div><button class="btn ghost" id="act-1">View</button></div>
+        <div class="list-item"><div class="meta">Jay opened issue #119 <small>Mobile redesign</small></div><button class="btn ghost" id="act-2">View</button></div>
+        <div class="list-item"><div class="meta">Mei commented <small>Billing v2</small></div><button class="btn ghost" id="act-3">Reply</button></div>
+        <div class="empty">No more activity</div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+(function(){
+  var menu=document.getElementById('btn-menu'),dd=document.getElementById('dd-menu');
+  if(menu&&dd){menu.addEventListener('click',function(e){e.stopPropagation();dd.classList.toggle('open')});document.addEventListener('click',function(){dd.classList.remove('open')})}
+  var nb=document.getElementById('btn-notif');
+  if(nb){nb.addEventListener('click',function(){window.location.href='/notifications'})}
+  var np=document.getElementById('btn-new');
+  if(np){np.addEventListener('click',function(){window.location.href='/projects/new'})}
+  window.__analytics=window.__analytics||[];
+  function track(ev,props){window.__analytics.push({ev:ev,props:props,ts:Date.now()})}
+  track('dashboard_view');
+  document.querySelectorAll('.stat .delta').forEach(function(el){track('stat_seen',{label:el.parentElement.querySelector('.label').textContent})});
+  var s=document.getElementById('search');
+  if(s){var t; s.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){track('search_query',{q:s.value})},500)})}
+  function fetchMetrics(){fetch('/api/metrics').then(function(r){return r.json()}).then(function(d){if(d&&d.revenue){document.querySelectorAll('.stat .val')[0].textContent='$'+d.revenue.toLocaleString()}}).catch(function(){})}
+  setTimeout(fetchMetrics,2000);setInterval(fetchMetrics,30000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>New customer — Acme Cloud</title>
+<style>
+:root{--primary:#2563eb;--bg:#f1f5f9;--surface:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0;--error:#dc2626}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+.app{max-width:760px;margin:0 auto;padding:24px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+header h1{font-size:22px;font-weight:600}
+header a{color:var(--primary);text-decoration:none;font-size:14px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:28px;margin-bottom:20px}
+.card h2{font-size:16px;font-weight:600;margin-bottom:4px}
+.card .desc{font-size:13px;color:var(--muted);margin-bottom:20px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.field{margin-bottom:16px}
+.field.full{grid-column:1/-1}
+.field label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+.field label .req{color:var(--error)}
+.field input,.field select,.field textarea{width:100%;height:40px;padding:0 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;background:var(--surface);font-family:inherit}
+.field textarea{height:auto;padding:10px 12px;resize:vertical;min-height:80px}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+.field .hint{font-size:12px;color:var(--muted);margin-top:4px}
+.field .err{font-size:12px;color:var(--error);margin-top:4px;display:none}
+.field.invalid input,.field.invalid select{border-color:var(--error)}
+.field.invalid .err{display:block}
+.check{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:14px}
+.check input{width:18px;height:18px}
+.radio{display:flex;flex-direction:column;gap:10px}
+.radio label{display:flex;align-items:center;gap:8px;font-weight:400;margin:0}
+.segmented{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.segmented input{position:absolute;opacity:0}
+.segmented label{padding:8px 16px;cursor:pointer;font-size:14px;border-right:1px solid var(--border)}
+.segmented label:last-child{border-right:none}
+.segmented input:checked+label{background:var(--primary);color:#fff}
+.tags{display:flex;flex-wrap:wrap;gap:6px;padding:6px;border:1px solid var(--border);border-radius:8px;min-height:40px;align-items:center}
+.tag{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;background:#dbeafe;color:#1e40af;border-radius:12px;font-size:12px}
+.tag button{border:none;background:none;color:inherit;cursor:pointer;font-size:14px;line-height:1}
+.tags input{border:none;outline:none;flex:1;min-width:80px;height:28px;font-size:14px}
+.actions{display:flex;justify-content:flex-end;gap:8px;padding-top:8px;border-top:1px solid var(--border);margin-top:8px}
+.btn{height:40px;padding:0 18px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer;font-weight:500}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.file{border:1px dashed var(--border);border-radius:8px;padding:20px;text-align:center;color:var(--muted);font-size:13px}
+.file input[type=file]{display:none}
+@media(max-width:600px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header><h1>New customer</h1><a id="back" href="/customers">‹ Back to customers</a></header>
+  <form id="cust-form" novalidate>
+    <div class="card">
+      <h2>Profile</h2>
+      <p class="desc">Basic customer information.</p>
+      <div class="grid2">
+        <div class="field"><label>First name <span class="req">*</span></label><input id="first" name="first" required><div class="err">Required</div></div>
+        <div class="field"><label>Last name <span class="req">*</span></label><input id="last" name="last" required><div class="err">Required</div></div>
+        <div class="field full"><label>Email <span class="req">*</span></label><input id="email" name="email" type="email" required><div class="err">Enter a valid email</div></div>
+        <div class="field"><label>Phone</label><input id="phone" name="phone" type="tel" placeholder="+1 555 000 0000"></div>
+        <div class="field"><label>Company</label><input id="company" name="company"></div>
+        <div class="field full"><label>Website</label><input id="website" name="website" type="url" placeholder="https://"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Billing</h2>
+      <p class="desc">Address and payment preferences.</p>
+      <div class="grid2">
+        <div class="field full"><label>Address line 1</label><input id="addr1" name="addr1"></div>
+        <div class="field full"><label>Address line 2</label><input id="addr2" name="addr2"></div>
+        <div class="field"><label>City</label><input id="city" name="city"></div>
+        <div class="field"><label>State / Province</label><input id="state" name="state"></div>
+        <div class="field"><label>ZIP / Postal</label><input id="zip" name="zip"></div>
+        <div class="field"><label>Country <span class="req">*</span></label><select id="country" name="country" required><option value="">Select…</option><option>United States</option><option>Canada</option><option>United Kingdom</option><option>Australia</option><option>Germany</option><option>Japan</option></select><div class="err">Required</div></div>
+        <div class="field full"><label>Currency</label>
+          <div class="radio">
+            <label><input type="radio" name="cur" id="cur-usd" value="USD" checked>USD — US Dollar</label>
+            <label><input type="radio" name="cur" id="cur-eur" value="EUR">EUR — Euro</label>
+            <label><input type="radio" name="cur" id="cur-jpy" value="JPY">JPY — Japanese Yen</label>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Plan & preferences</h2>
+      <p class="desc">Subscription tier and account settings.</p>
+      <div class="field"><label>Plan</label>
+        <div class="segmented">
+          <input type="radio" name="plan" id="plan-free" value="free"><label for="plan-free">Free</label>
+          <input type="radio" name="plan" id="plan-pro" value="pro" checked><label for="plan-pro">Pro</label>
+          <input type="radio" name="plan" id="plan-ent" value="ent"><label for="plan-ent">Enterprise</label>
+        </div>
+      </div>
+      <div class="field"><label>Tags</label>
+        <div class="tags" id="tags">
+          <span class="tag">vip <button type="button" id="rm-vip">×</button></span>
+          <span class="tag">beta <button type="button" id="rm-beta">×</button></span>
+          <input id="tag-input" placeholder="Add tag…">
+        </div>
+      </div>
+      <div class="field full"><label>Notes</label><textarea id="notes" name="notes" placeholder="Internal notes about this customer…"></textarea></div>
+      <div class="check"><input id="newsletter" type="checkbox" name="newsletter" checked><label for="newsletter">Send product newsletter</label></div>
+      <div class="check"><input id="marketing" type="checkbox" name="marketing"><label for="marketing">Allow marketing emails</label></div>
+      <div class="check"><input id="tos" type="checkbox" name="tos" required><label for="tos">I agree to the <a id="tos-link" href="/tos">Terms of Service</a></label></div>
+      <div class="field full"><label>Avatar</label>
+        <label class="file" for="avatar"><input id="avatar" type="file" accept="image/*">Drop a file or click to upload (max 2MB)</label>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="cancel" type="button">Cancel</button>
+      <button class="btn primary" id="save" type="submit">Save customer</button>
+    </div>
+  </form>
+</div>
+<script>
+(function(){
+  var f=document.getElementById('cust-form');
+  window.__analytics=window.__analytics||[];
+  function track(ev,props){window.__analytics.push({ev:ev,props:props,ts:Date.now()})}
+  track('form_view');
+  function validate(){var ok=true;['first','last','email','country'].forEach(function(id){var el=document.getElementById(id);var wrap=el.closest('.field');if(el.required&&!el.value){wrap.classList.add('invalid');ok=false}else{wrap.classList.remove('invalid')}});var tos=document.getElementById('tos');if(!tos.checked){ok=false;tos.closest('.check').style.color='#dc2626'}return ok}
+  f.addEventListener('submit',function(e){e.preventDefault();if(!validate()){track('form_invalid');return}var btn=document.getElementById('save');btn.disabled=true;btn.textContent='Saving…';var data={};new FormData(f).forEach(function(v,k){data[k]=v});track('form_submit');fetch('/api/customers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(function(r){return r.json()}).then(function(d){if(d.ok){window.location.href='/customers/'+d.id}else{btn.disabled=false;btn.textContent='Save customer';track('form_error',{msg:d.error})}}).catch(function(){btn.disabled=false;btn.textContent='Save customer'})});
+  document.getElementById('cancel').addEventListener('click',function(){track('form_cancel');window.history.back()});
+  document.getElementById('back').addEventListener('click',function(){track('back_click')});
+  ['rm-vip','rm-beta'].forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('click',function(){track('tag_remove',{id:id})})});
+  var tagInput=document.getElementById('tag-input');tagInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();track('tag_add',{v:tagInput.value});tagInput.value=''}});
+  document.getElementById('tos-link').addEventListener('click',function(){track('tos_view')});
+  ['plan-free','plan-pro','plan-ent'].forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('change',function(){track('plan_change',{v:el.value})})});
+})();
+</script>
+</body>
+</html>

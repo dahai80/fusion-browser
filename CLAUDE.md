@@ -20,6 +20,24 @@ smoke, Phase 4 all verified via release binary + Python verify scripts
 `longrun_leak.py` / `metrics_smoke.py` → reports in `scripts/*-report.json`).
 Source lives in `Sources/FusionBrowser/`, tests in `Tests/FusionBrowserTests/`.
 
+**Enterprise-commercial gap wave landed (2026-08-29)** — closes the 4 items the 0828
+product audit's enterprise tier flagged beyond the 6 blockers: H-9 multi-node capacity
+plane (per-node `FBNodeCapacity` identity + UDS `{type:"capacity"}` route behind the
+`.metrics` cap, reporting maxSessions/liveSessions/freeMemoryMB/ramGB; no in-process
+scheduler — cross-node scheduling/migration is fusion-gateway-side; `docs/multinode-contract.md`
++ fusion-gateway issue; pinned by `scripts/multinode_smoke.py` + `NodeCapacityTests`),
+R-7 10-page AXTree compression SLA (versioned corpus `Tests/fixtures/pages/` — 10
+real-structure HTML fixtures; `scripts/perf_multipage.py` measures the PRD §1.1 SLA with
+the correct **tiktoken token** metric: P50 compression ≥0.90 median AND P95 AXTree
+node-body token ≤1500; header excluded — base64 data-URL fixtures inflate the url line
+~1500 tokens, real http URLs add ~10; PASS P50=0.926 P95=407; hard gate in
+`release_gate.sh`; shadow-DOM honestly excluded only if the walker extracts 0 nodes),
+R-8 sanitizer combination-variant fuzz (`InjectionFuzzTests` — all 2^11 hiddenRules
+subsets + render combos + adversarial-naming near-misses, pure deterministic), credential
+P2 (E-14 per-cookie logout deletes only this session's injected cookies by name|path not
+the whole domain; E-27 setCookie completion-handler + off-main wait returns true only
+after commit; E-39 cookie name masked in os_log). Build green, **210 tests** pass.
+
 Authoritative spec: `architecture/fusion-browser-prd-0826.md` (v2.0). Audit:
 `audit/fusion-browser-audit-0826.md`. This project's `README.md` documents the
 landed scope, source map, and protocol shape in detail.
@@ -29,7 +47,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 198 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 210 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -47,7 +65,7 @@ longrun_leak / verify_nonpersistent), not part of the build.
 
 B-6/R-6 CI: `.github/workflows/release-gate.yml` gates PRs to main. Two jobs —
 `build-and-test` (GitHub-hosted `macos-14` arm64: `swift build -c release` +
-`swift test --disable-sandbox`, the 198 deterministic tests, no GUI needed) and
+`swift test --disable-sandbox`, the 210 deterministic tests, no GUI needed) and
 `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]` runner with a
 GUI session: full `scripts/release_gate.sh` — 9 live harnesses incl
 `ownership_smoke.py`, needs a CoreGraphics display + main run loop for WKWebView).
