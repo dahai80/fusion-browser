@@ -96,6 +96,7 @@ Build green, **210 tests pass** (198 + NodeCapacity + InjectionFuzz + E-14 crede
 - FR-12 observability: metrics (count + latency quantiles) + trace_id full chain + credential append-only audit log
 - FR-13 scheduling guards: max_actions + task_timeout + consecutive-identical-action break + rebuild-depth cap 1
 - NFR-R tiered watchdog: navigate 30s / click·type 2s / scroll 500ms / screenshot·evaluate 5s; timeout crashed→rebuild, replay idempotent actions only (navigate/scroll/screenshot), non-idempotent (click/type/evaluate) fail directly
+- R-9 soft timeout (known limitation): no public WKWebView API cancels a running `evaluateJavaScript`/snapshot mid-flight, so the watchdog is cooperative — it sets a cancel flag checked at dispatch entry (before the webview is touched) and JOINs the in-flight block. A timeout thus bounds the caller to **≤2×timeoutMs** worst case (the initial wait + a join wait of equal length), not a hard mid-action kill. The join is deliberate: it prevents a leaked block from touching a session the caller already gave up on (mid-close/rebuild). Documented per the 0828 audit R-9 acceptance criterion; not a correctness gap, a budget honesty note.
 
 **Phase 2 landed**
 - T2.1 AXTree extractor: injected JS walker extracts DOM, structural fingerprint (tag + attribute subset + docPath) + JS-side `window.__fbMap` WeakRef<Node> stable mapping, `eN` synthetic locator; Markdown reduction (interactive nodes one line each, drop non-essential fields); stale `eN` returns `node_stale`
