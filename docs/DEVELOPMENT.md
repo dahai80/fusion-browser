@@ -81,6 +81,16 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
   `--disable-sandbox` was mandatory only because the plugin ran `cargo` and is no
   longer required. Wire schema + AXTree output unchanged. See
   `docs/ARCHITECTURE.md` §8.
+- **R-9 watchdog is a soft timeout, ≤2×timeoutMs (known limitation).** No public
+  WKWebView API cancels a running `evaluateJavaScript`/`WKSnapshot` mid-flight, so
+  `runWithWatchdog` (ActionDriver.swift) is cooperative: it sets a cancel flag the
+  block checks at dispatch entry (BEFORE the webview is touched), then on timeout
+  JOINs the in-flight block with a second wait of equal length. Worst-case caller
+  budget is therefore ≤2×timeoutMs, not a hard mid-action kill. Do NOT remove the
+  join to make it "instant" — the join bounds a leaked block that would otherwise
+  touch a session mid-close/rebuild (polluting the next session's `__fbMap` /
+  touching a dead WKWebView). The soft-timeout budget is the honest contract;
+  document it, do not pretend it is a hard kill.
 
 ## 4. Testing Boundaries
 

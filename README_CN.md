@@ -31,6 +31,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 - FR-12 可观测性：metrics（计数 + 延迟分位数）+ trace_id 全链路 + 凭据 append-only 审计日志
 - FR-13 调度护栏：max_actions + task_timeout + 连续相同 action 中断 + 重建深度上限 1
 - NFR-R 分档 watchdog：navigate 30s / click·type 2s / scroll 500ms / screenshot·evaluate 5s；超时 crashed→rebuild，仅回放幂等 action（navigate/scroll/screenshot），非幂等（click/type/evaluate）直接 fail
+- R-9 软超时（已知限制）：WKWebView 无公开 API 中途取消正在执行的 `evaluateJavaScript`/snapshot，故 watchdog 为协作式——设取消标志，仅在派发入口（触及 webview 前）检查，并 JOIN 在飞 block。超时将调用方约束在 **≤2×timeoutMs** 最坏预算（初次等待 + 等长 join 等待），非中途硬杀。join 是刻意的：防泄漏 block 触碰调用方已放弃的会话（mid-close/rebuild）。按 0828 审计 R-9 验收标准标注；非正确性缺陷，是预算诚实声明。
 
 **Phase 2 已落地**
 - T2.1 AXTree 提炼器：注入 JS walker 抽 DOM，结构指纹（tag + 属性子集 + docPath）+ JS 侧 `window.__fbMap` WeakRef<Node> 稳定映射，`eN` 合成定位；Markdown 降维（交互节点一行一项，弃非必要字段）；`eN` 失效返 `node_stale`
