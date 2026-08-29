@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Orders — Acme Cloud</title>
+<style>
+:root{--primary:#2563eb;--bg:#f1f5f9;--surface:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0;--hover:#f8fafc;--green:#16a34a;--red:#dc2626;--amber:#d97706}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+.app{max-width:1200px;margin:0 auto;padding:24px}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+header h1{font-size:22px;font-weight:600}
+.actions{display:flex;gap:8px}
+.btn{height:36px;padding:0 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;text-decoration:none;color:var(--text)}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.toolbar{display:flex;gap:12px;margin-bottom:16px;align-items:center}
+.toolbar select{height:36px;padding:0 28px 0 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer}
+.toolbar .search{flex:1;position:relative}
+.toolbar input{width:100%;height:36px;padding:0 12px 0 34px;border:1px solid var(--border);border-radius:8px;font-size:14px}
+.toolbar svg{position:absolute;left:10px;top:9px;color:var(--muted)}
+.table-wrap{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{position:sticky;top:0;background:var(--hover);text-align:left;padding:10px 14px;font-weight:500;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.03em;border-bottom:1px solid var(--border);white-space:nowrap}
+thead th.sortable{cursor:pointer;user-select:none}
+thead th.sortable:hover{color:var(--text)}
+thead th .sort-ind{margin-left:4px;font-size:10px;color:var(--primary)}
+tbody td{padding:10px 14px;border-bottom:1px solid var(--border)}
+tbody tr:hover{background:var(--hover)}
+tbody tr:last-child td{border-bottom:none}
+.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--muted)}
+.amount{font-weight:500;text-align:right}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:500}
+.tag.paid{background:#dcfce7;color:var(--green)}.tag.pending{background:#fef3c7;color:var(--amber)}.tag.refunded{background:#fee2e2;color:var(--red)}.tag.shipped{background:#dbeafe;color:#2563eb}
+.cust{display:flex;align-items:center;gap:8px}
+.avatar{width:26px;height:26px;border-radius:50%;background:var(--primary);color:#fff;display:grid;place-items:center;font-size:10px;font-weight:600;flex-shrink:0}
+.empty{padding:48px;text-align:center;color:var(--muted)}
+.pagination{display:flex;align-items:center;justify-content:space-between;margin-top:16px;font-size:13px;color:var(--muted)}
+.pages{display:flex;gap:4px}
+.pages a{min-width:32px;height:32px;padding:0 8px;display:grid;place-items:center;border:1px solid var(--border);border-radius:6px;text-decoration:none;color:var(--text);font-size:13px}
+.pages a.current{background:var(--primary);color:#fff;border-color:var(--primary)}
+.pages a.disabled{color:var(--muted);cursor:not-allowed;opacity:.5}
+.summary{display:flex;gap:24px;padding:12px 0;font-size:13px;color:var(--muted)}
+.summary b{color:var(--text)}
+@media(max-width:768px){.hide-sm{display:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Orders</h1>
+    <div class="actions">
+      <a class="btn" id="export" href="/orders/export">Export CSV</a>
+      <a class="btn primary" id="new-order" href="/orders/new">New order</a>
+    </div>
+  </header>
+  <div class="toolbar">
+    <select id="f-status"><option value="">All status</option><option>Paid</option><option>Pending</option><option>Refunded</option><option>Shipped</option></select>
+    <select id="f-range"><option value="">All time</option><option>Last 7 days</option><option>Last 30 days</option><option>This year</option></select>
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="Search order id or customer…">
+    </div>
+    <button class="btn" id="reset">Reset</button>
+  </div>
+  <div class="summary">
+    <span><b>348</b> orders</span>
+    <span><b>$182,430</b> total</span>
+    <span><b>$524</b> avg</span>
+    <span><b>3.2%</b> refunded</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="sortable" id="sort-id">Order ID <span class="sort-ind">▾</span></th>
+          <th class="sortable" id="sort-cust">Customer</th>
+          <th class="sortable hide-sm" id="sort-date">Date</th>
+          <th class="sortable" id="sort-amount">Amount</th>
+          <th id="th-status">Status</th>
+          <th id="th-items">Items</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"><!-- rows injected --></tbody>
+    </table>
+  </div>
+  <div class="pagination">
+    <span id="info">Showing 1–25 of 348</span>
+    <div class="pages">
+      <a class="disabled" id="prev">‹</a>
+      <a class="current" id="p1" href="?p=1">1</a>
+      <a id="p2" href="?p=2">2</a>
+      <a id="p3" href="?p=3">3</a>
+      <a id="p4" href="?p=4">4</a>
+      <a id="p5" href="?p=5">5</a>
+      <a id="next" href="?p=2">›</a>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var tbody=document.getElementById('tbody');
+  var names=['Sara Kim','Jay Doe','Mei Lin','Raj Anand','Nina Costa','Tom Wright','Olga Petrov','Sam Lee','Kai Chen','Eva Novak'];
+  var status=['paid','pending','shipped','refunded'];
+  var rows=[];
+  for(var i=0;i<25;i++){var idx=i;var amt=(Math.random()*900+50).toFixed(2);var st=status[i%4];var n=names[i%names.length];var ini=n.split(' ').map(function(p){return p[0]}).join('');rows.push('<tr><td class=id>#ORD-'+(1000+i)+'</td><td class=cust><span class=avatar>'+ini+'</span>'+n+'</td><td class=hide-sm>2026-08-'+String(26-i%26).padStart(2,'0')+'</td><td class=amount>$'+amt+'</td><td><span class="tag '+st+'">'+st+'</span></td><td>'+(1+i%5)+'</td></tr>')}
+  tbody.innerHTML=rows.join('');
+  window.__analytics=window.__analytics||[];
+  function track(ev,props){window.__analytics.push({ev:ev,props:props,ts:Date.now()})}
+  track('orders_view');
+  ['sort-id','sort-cust','sort-date','sort-amount'].forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('click',function(){track('sort',{col:id})})});
+  document.getElementById('f-status').addEventListener('change',function(){track('filter_status',{v:this.value})});
+  document.getElementById('f-range').addEventListener('change',function(){track('filter_range',{v:this.value})});
+  var q=document.getElementById('q');var t;q.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){track('search',{q:q.value})},300)});
+  document.getElementById('reset').addEventListener('click',function(){track('reset_filters')});
+  document.getElementById('export').addEventListener('click',function(){track('export_click')});
+  document.getElementById('new-order').addEventListener('click',function(){track('new_order_click')});
+  document.getElementById('next').addEventListener('click',function(e){e.preventDefault();track('page_next')});
+  ['p1','p2','p3','p4','p5'].forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('click',function(e){e.preventDefault();track('page_jump',{p:id})})});
+})();
+</script>
+</body>
+</html>

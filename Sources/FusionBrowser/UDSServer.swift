@@ -299,6 +299,18 @@ final class FBClientConnection {
             let counters = arr.filter { !isLatency($0.name) }
             let latency = arr.filter { isLatency($0.name) }
             send(resp: .metrics(MetricsResponse(counters: counters, latency: latency)))
+        case .capacity:
+            // H-9: per-node capacity report — the scheduler-placement input for an external
+            // scheduler (fusion-gateway; cross-node scheduling/migration lands there per
+            // audit R-10). Read-only resource info (node id + max/live sessions + free
+            // memory), lower-sensitivity than metrics counters, so it reuses the .metrics
+            // cap (an operator exposing metrics already exposes resource shape). System
+            // caller (no owner needed). Logs node-id + live-count for ops placement audit,
+            // never session contents.
+            guard caps.contains(.metrics) else { send(error: .authDenied); return }
+            let cap = manager.capacity()
+            log.info("Client", "capacity query node=\(cap.nodeId.prefix(8)) live=\(cap.liveSessions)/\(cap.maxSessions) freeMB=\(cap.freeMemoryMB)")
+            send(resp: .capacity(cap))
         }
     }
 

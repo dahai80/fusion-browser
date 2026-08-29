@@ -12,6 +12,13 @@ macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与
 
 Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，99 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
 
+**企业级商用差距补齐波次已落地（2026-08-29）** — 闭合 0828 产品审计企业档在 6 个 blocker 之外点名的四项：
+- **H-9 多节点容量面** — 节点身份（`FBNodeCapacity.nodeId`，进程生命周期 UUID）+ UDS `{type:"capacity"}` 路由（`.metrics` cap 门控）上报 `maxSessions`/`liveSessions`/`freeMemoryMB`/`ramGB`，供外部调度器做选址查询。本侧不出进程内调度器（审计 R-10 改法：跨节点调度/迁移落在 fusion-gateway；本侧出契约 + `docs/multinode-contract.md` + fusion-gateway issue）。`scripts/multinode_smoke.py`（3 进程、独立 nodeId）+ `NodeCapacityTests` 实证。
+- **R-7 10 页 AXTree 压缩 SLA** — 版本化语料集 `Tests/fixtures/pages/`（10 个真实结构 HTML：登录/仪表盘/SPA 列表/重表格/重表单/重导航/深嵌套/Shadow DOM/隐藏注入/长文）。`scripts/perf_multipage.py` 按 PRD §1.1 正确指标度量：**tiktoken token**（cl100k_base），门限 = **P50 压缩率 ≥90%**（中位数，非逐页）AND **P95 AXTree 节点体 token ≤1500**。表头排除（base64 data URL 会把 url 行撑到 ~1500 token；真实 http URL 仅 +~10）。PASS：P50=0.926、P95=407。`release_gate.sh` 硬门（仅 live-path）。Shadow DOM 用例仅在 walker 抽到 0 节点时诚实排除（本例抽到 light-tree 节点——计入，不排除）。
+- **R-8 Sanitizer 组合变体 fuzz** — `InjectionFuzzTests` 遍历 `FBSanitizer.hiddenRules` 全部 2^11 子集（每子集判定 hidden + 精确匹配），render+静态组合，对抗命名近邻（精确字符串契约零误报）。纯确定性，适配 `swift test`。
+- **凭据 P2** — E-14 注销仅删本会话注入的 cookie（按 name|path），不再删整域（两个同域会话不再互踩）；E-27 `setCookie` 用 completion 回调 + 离主线程等待（提交后才返 true，非提前）；E-39 cookie `name` 在 os_log 脱敏（原 `%{public}` 泄露 auth-token 身份）。
+编译通过，**210 单元测试通过**（198 + NodeCapacity + InjectionFuzz + E-14 凭据）。
+
 **Phase 1 已落地**
 - Swift 6 SPM 包，Headless/Headed WKWebView 封装（`nonPersistent` dataStore 隔离；WebContent 进程数由 session 上限 + WebKit 站点级隔离约束，非共享进程池——`WKProcessPool` macOS 12+ 已弃用，按 B-2 移除）
 - UDS 服务端（POSIX socket + `DispatchSourceRead`，绕开 `NWListener` AF_UNIX accept 不可靠问题）

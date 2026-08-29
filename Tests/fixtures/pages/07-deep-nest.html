@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Widget config — Acme Cloud</title>
+<style>
+:root{--primary:#2563eb;--bg:#f1f5f9;--surface:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:24px}
+.app{max-width:900px;margin:0 auto}
+header{margin-bottom:20px}
+header h1{font-size:20px;font-weight:600}
+header p{color:var(--muted);font-size:13px;margin-top:4px}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px}
+.panel h2{font-size:15px;font-weight:600;margin-bottom:12px}
+.kv{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.kv:last-child{border:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-weight:500}
+.nest{padding:12px;border:1px dashed var(--border);border-radius:8px;margin:8px 0}
+.nest .label{font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
+.actions{display:flex;gap:8px;margin-top:16px}
+.btn{height:36px;padding:0 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer;text-decoration:none;color:var(--text)}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn.danger{color:#dc2626}
+.field{margin-bottom:12px}
+.field label{display:block;font-size:13px;margin-bottom:4px}
+.field input{width:100%;height:38px;padding:0 10px;border:1px solid var(--border);border-radius:8px;font-size:14px}
+.toggle{display:flex;align-items:center;gap:8px;font-size:13px}
+.toggle input{width:18px;height:18px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Widget configuration</h1>
+    <p>Edit advanced settings for the analytics widget.</p>
+  </header>
+  <div class="panel">
+    <h2>General</h2>
+    <div class="nest"><div class="label">Container</div>
+      <div class="nest"><div class="label">Layout</div>
+        <div class="nest"><div class="label">Section</div>
+          <div class="nest"><div class="label">Group</div>
+            <div class="nest"><div class="label">Row</div>
+              <div class="nest"><div class="label">Cell</div>
+                <div class="nest"><div class="label">Field</div>
+                  <div class="nest"><div class="label">Control</div>
+                    <div class="grid">
+                      <div class="field"><label for="w-title">Title</label><input id="w-title" value="Revenue chart"></div>
+                      <div class="field"><label for="w-refresh">Refresh (s)</label><input id="w-refresh" type="number" value="30"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Options</h2>
+    <div class="kv"><span class="k">Status</span><span class="v">Active</span></div>
+    <div class="kv"><span class="k">Owner</span><span class="v">Sara Kim</span></div>
+    <div class="kv"><span class="k">Last edit</span><span class="v">2026-08-26 14:32</span></div>
+    <div class="toggle" style="margin-top:12px"><input id="opt-autoscale" type="checkbox" checked><label for="opt-autoscale">Auto-scale Y axis</label></div>
+    <div class="toggle"><input id="opt-legend" type="checkbox" checked><label for="opt-legend">Show legend</label></div>
+    <div class="toggle"><input id="opt-anon" type="checkbox"><label for="opt-anon">Anonymize data</label></div>
+  </div>
+  <div class="actions">
+    <a class="btn" id="back" href="/widgets">‹ Back</a>
+    <a class="btn danger" id="reset" href="/widgets/reset">Reset to default</a>
+    <button class="btn primary" id="save">Save changes</button>
+  </div>
+</div>
+<script>
+(function(){
+  window.__analytics=window.__analytics||[];
+  function track(ev,props){window.__analytics.push({ev:ev,props:props,ts:Date.now()})}
+  track('config_view');
+  document.getElementById('save').addEventListener('click',function(){track('config_save');var data={title:document.getElementById('w-title').value,refresh:document.getElementById('w-refresh').value,autoscale:document.getElementById('opt-autoscale').checked,legend:document.getElementById('opt-legend').checked,anon:document.getElementById('opt-anon').checked};fetch('/api/widgets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(function(r){return r.json()}).then(function(d){if(d.ok)window.location.href='/widgets'})});
+  document.getElementById('back').addEventListener('click',function(){track('config_back')});
+  document.getElementById('reset').addEventListener('click',function(){track('config_reset')});
+  ['opt-autoscale','opt-legend','opt-anon'].forEach(function(id){var el=document.getElementById(id);el.addEventListener('change',function(){track('option_toggle',{id:id,v:el.checked})})});
+})();
+</script>
+</body>
+</html>

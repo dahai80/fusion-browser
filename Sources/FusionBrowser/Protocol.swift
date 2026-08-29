@@ -159,9 +159,10 @@ public enum FBRequest: Codable {
     case execute(BrowserActionRequest)
     case close(sessionId: String)
     case metrics
+    case capacity
 
     private enum CodingKeys: String, CodingKey { case type, payload, sessionId }
-    private enum ReqType: String, Codable { case createSession = "create_session", execute, close, metrics }
+    private enum ReqType: String, Codable { case createSession = "create_session", execute, close, metrics, capacity }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -178,6 +179,8 @@ public enum FBRequest: Codable {
             self = .close(sessionId: sid)
         case .metrics:
             self = .metrics
+        case .capacity:
+            self = .capacity
         }
     }
 
@@ -195,6 +198,8 @@ public enum FBRequest: Codable {
             try c.encode(sid, forKey: .sessionId)
         case .metrics:
             try c.encode(ReqType.metrics, forKey: .type)
+        case .capacity:
+            try c.encode(ReqType.capacity, forKey: .type)
         }
     }
 
@@ -204,6 +209,7 @@ public enum FBRequest: Codable {
         case .execute(let r): return r.traceId
         case .close: return nil
         case .metrics: return nil
+        case .capacity: return nil
         }
     }
 }
@@ -213,10 +219,11 @@ public enum FBResponse: Codable {
     case state(BrowserStateResponse)
     case closed(sessionId: String)
     case metrics(MetricsResponse)
+    case capacity(FBNodeCapacity)
     case error(FBError)
 
     private enum CodingKeys: String, CodingKey { case type, payload, sessionId }
-    private enum RespType: String, Codable { case createSession = "create_session", state, closed, metrics, error }
+    private enum RespType: String, Codable { case createSession = "create_session", state, closed, metrics, capacity, error }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -230,6 +237,8 @@ public enum FBResponse: Codable {
             self = .closed(sessionId: try c.decode(String.self, forKey: .sessionId))
         case .metrics:
             self = .metrics(try c.decode(MetricsResponse.self, forKey: .payload))
+        case .capacity:
+            self = .capacity(try c.decode(FBNodeCapacity.self, forKey: .payload))
         case .error:
             self = .error(try c.decode(FBError.self, forKey: .payload))
         }
@@ -249,6 +258,9 @@ public enum FBResponse: Codable {
             try c.encode(sid, forKey: .sessionId)
         case .metrics(let p):
             try c.encode(RespType.metrics, forKey: .type)
+            try c.encode(p, forKey: .payload)
+        case .capacity(let p):
+            try c.encode(RespType.capacity, forKey: .type)
             try c.encode(p, forKey: .payload)
         case .error(let e):
             try c.encode(RespType.error, forKey: .type)

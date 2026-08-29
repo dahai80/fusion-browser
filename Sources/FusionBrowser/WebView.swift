@@ -157,12 +157,36 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
             props[HTTPCookiePropertyKey(rawValue: "SameSite")] = sameSite
         }
         guard let cookie = HTTPCookie(properties: props) else {
-            log.warn("WebView", "cookie build failed name=\(name) domain=\(domain) sess=\(sessionId)")
+            log.warn("WebView", "cookie build failed name=<masked> domain=\(domain) sess=\(sessionId)")
             return false
         }
-        store.setCookie(cookie)
-        log.info("WebView", "cookie injected name=\(name) domain=\(domain) httponly=\(attrs["httponly"] ?? "false") samesite=\(attrs["samesite"] ?? "") sess=\(sessionId)")
-        return true
+        // E-27: setCookie completion + off-main semaphore wait. The no-completion
+        // store.setCookie(cookie) returns immediately and the cookie commits asynchronously,
+        // so the old path returned true BEFORE the store actually held the cookie — a create
+        // that navigated right after inject could miss the credential (race). The completion-
+        // handler overload confirms the commit. Mirror clearCookies(): NEVER sync-wait on main
+        // (the completion dispatches to main; sync-wait on main deadlocks); on main fall back
+        // to the no-completion form + warn that the commit isn't confirmed (honest — the
+        // create inject path runs off-main per SessionManager, so the main branch is a rare
+        // guard, not the live path). Returns true only after the completion fires.
+        if Thread.isMainThread {
+            store.setCookie(cookie)
+            log.warn("WebView", "cookie setCookie on main: commit not confirmed domain=\(domain) sess=\(sessionId)")
+            return true
+        }
+        let sem = DispatchSemaphore(value: 0)
+        var committed = false
+        store.setCookie(cookie) {
+            committed = true
+            sem.signal()
+        }
+        let waited = sem.wait(timeout: .now() + .seconds(2))
+        // E-39: cookie name reveals auth-token identity (e.g. sessionid, __Secure-SESSID).
+        // Mask it like a password — log only domain + sess for ops correlation. Drop
+        // httponly/samesite (low ops value, trims the line). The credential audit log
+        // (Observability.swift) already records op/result only, never the value or name.
+        log.info("WebView", "cookie injected name=<masked> domain=\(domain) committed=\(committed) timedout=\(waited == .timedOut) sess=\(sessionId)")
+        return committed
     }
 
     // F-12: clear in-memory cookies for this session. logout must revoke the RUNTIME

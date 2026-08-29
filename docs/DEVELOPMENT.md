@@ -8,7 +8,7 @@
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release          # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox    # full suite, 198 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox    # full suite, 210 tests (--disable-sandbox no longer required:
                                 #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 swift test --disable-sandbox --filter AXTreeTests/StableMappingTests   # single method
@@ -94,15 +94,17 @@ These are hard-won, load-bearing. Violating them hangs or crashes the engine.
 - **Do NOT add live-WKWebView assertions to the test target** — they will hang
   the suite. New tests that need a webview go in the Python verify harnesses.
 - **Verify scripts** (`scripts/verify_nonpersistent.py`, `perf_bench.py`,
-  `uma_coexist.py`, `longrun_leak.py`) run against the release binary and write
-  `scripts/*-report.json` (gitignored). Run them for integration verification;
-  clean up process data after, keep only final outputs + logs.
+  `perf_multipage.py`, `multinode_smoke.py`, `uma_coexist.py`, `longrun_leak.py`)
+  run against the release binary and write `scripts/*-report.json` (gitignored).
+  Run them for integration verification; clean up process data after, keep only
+  final outputs + logs.
 - **CI release gate (B-6/R-6):** `.github/workflows/release-gate.yml` runs on
   every PR to main. `build-and-test` (GitHub-hosted `macos-14`) does
-  `swift build -c release` + `swift test --disable-sandbox` (198 deterministic
+  `swift build -c release` + `swift test --disable-sandbox` (210 deterministic
   tests). `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]`,
   needs a GUI session for WKWebView) runs the full `scripts/release_gate.sh` —
-  9 live harnesses. Both are required status checks; failure blocks merge.
+  10 live hard-gate harnesses (incl. `perf_multipage.py` R-7 SLA) + informational
+  perf_bench/multinode. Both are required status checks; failure blocks merge.
   `uma_coexist` needs fusion-mlx on `:11434` — set repo var `SKIP_UMA=1` to
   skip it on a runner without MLX.
 - **Rust core parity gate — removed (E-17~20 / #68).** The deleted
@@ -178,7 +180,7 @@ A new action touches several points — keep them in sync:
   contract — update it when the wire schema or action contract changes.
 - **Keep the test count and landed fixes current** in `README.md` /
   `README_CN.md` (e.g. node-id bare `eN` fix, E-17~20 Rust removal, test count).
-  The suite is 198 tests (Rust-core parity + worker-pool tests removed in
-  E-17~20 / #68); stale numbers erode trust faster than no number.
+  The suite is 210 tests (198 + NodeCapacity + InjectionFuzz + E-14 credential,
+  enterprise-gap wave 2026-08-29); stale numbers erode trust faster than no number.
 - **Clean up process data after verification** — keep only final outputs + logs.
   `scripts/*-report.json` is gitignored; do not commit transient run artifacts.

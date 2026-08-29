@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Acme Cloud — Docs</title>
+<style>
+:root{--primary:#2563eb;--bg:#f8fafc;--surface:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0;--hover:#f1f5f9}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5}
+.topnav{background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
+.topnav .inner{max-width:1200px;margin:0 auto;display:flex;align-items:center;height:56px;padding:0 24px;gap:24px}
+.topnav .brand{font-weight:700;font-size:16px;color:var(--text);text-decoration:none}
+.topnav .links{display:flex;gap:4px;margin-left:8px}
+.topnav .links a{padding:8px 12px;border-radius:6px;text-decoration:none;color:var(--muted);font-size:14px}
+.topnav .links a:hover{background:var(--hover);color:var(--text)}
+.topnav .links a.active{color:var(--primary);font-weight:500}
+.topnav .right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.topnav .search{position:relative}
+.topnav input{height:36px;width:220px;padding:0 12px 0 34px;border:1px solid var(--border);border-radius:18px;font-size:14px;background:var(--bg)}
+.topnav svg{position:absolute;left:10px;top:9px;color:var(--muted)}
+.btn{height:36px;padding:0 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer;text-decoration:none;color:var(--text);display:inline-flex;align-items:center;gap:6px}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.layout{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:240px 1fr;gap:32px;padding:32px 24px}
+.sidenav h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:20px 0 8px;font-weight:500}
+.sidenav h3:first-child{margin-top:0}
+.sidenav a{display:block;padding:6px 10px;border-radius:6px;text-decoration:none;color:var(--text);font-size:14px;line-height:1.4}
+.sidenav a:hover{background:var(--hover)}
+.sidenav a.active{background:#dbeafe;color:var(--primary);font-weight:500}
+.sidenav .sub a{padding-left:22px;font-size:13px;color:var(--muted)}
+.content h1{font-size:28px;font-weight:700;margin-bottom:8px}
+.content .lead{font-size:16px;color:var(--muted);margin-bottom:24px}
+.content h2{font-size:20px;font-weight:600;margin:28px 0 12px}
+.content p{margin-bottom:14px;color:#334155}
+.content code{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:13px}
+.breadcrumb{display:flex;gap:6px;font-size:13px;color:var(--muted);margin-bottom:16px}
+.breadcrumb a{color:var(--muted);text-decoration:none}
+.breadcrumb a:hover{color:var(--text)}
+.mega-wrap{position:relative}
+.mega{position:absolute;left:0;top:calc(100% + 4px);background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.1);padding:20px;display:none;grid-template-columns:repeat(3,1fr);gap:24px;min-width:640px;z-index:40}
+.mega.open{display:grid}
+.mega .col h4{font-size:12px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;font-weight:500}
+.mega .col a{display:block;padding:4px 0;text-decoration:none;color:var(--text);font-size:13px}
+.mega .col a:hover{color:var(--primary)}
+.mega .col a small{display:block;color:var(--muted);font-size:12px}
+.cta{background:var(--primary);color:#fff;border-radius:10px;padding:24px;margin-top:24px;display:flex;align-items:center;justify-content:space-between}
+.cta h3{font-size:18px;font-weight:600}
+.cta a{background:#fff;color:var(--primary);padding:8px 16px;border-radius:8px;text-decoration:none;font-weight:500;font-size:14px}
+@media(max-width:900px){.layout{grid-template-columns:1fr}.sidenav{display:none}.topnav .search,.topnav .links{display:none}}
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <div class="inner">
+    <a class="brand" id="brand" href="/">Acme Cloud</a>
+    <div class="links">
+      <a id="tn-product" href="/product">Product</a>
+      <a id="tn-pricing" href="/pricing">Pricing</a>
+      <a id="tn-docs" href="/docs" class="active">Docs</a>
+      <a id="tn-blog" href="/blog">Blog</a>
+      <div class="mega-wrap">
+        <a id="tn-resources" href="/resources">Resources ▾</a>
+        <div class="mega" id="mega">
+          <div class="col"><h4>Guides</h4><a id="r-guide-1" href="/guides/quickstart">Quickstart <small>Get running in 5 min</small></a><a id="r-guide-2" href="/guides/auth">Authentication <small>Token & SSO setup</small></a><a id="r-guide-3" href="/guides/webhooks">Webhooks <small>Real-time events</small></a></div>
+          <div class="col"><h4>Reference</h4><a id="r-ref-1" href="/api">REST API <small>v2 endpoints</small></a><a id="r-ref-2" href="/sdk/js">JS SDK <small>Browser + Node</small></a><a id="r-ref-3" href="/sdk/python">Python SDK <small>Sync + async</small></a></div>
+          <div class="col"><h4>Community</h4><a id="r-com-1" href="/community">Forum <small>Q&A & tips</small></a><a id="r-com-2" href="/status">Status <small>Live uptime</small></a><a id="r-com-3" href="/changelog">Changelog <small>What's new</small></a></div>
+        </div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="search" type="search" placeholder="Search docs…">
+      </div>
+      <a class="btn" id="signin" href="/login">Sign in</a>
+      <a class="btn primary" id="signup" href="/signup">Get started</a>
+    </div>
+  </div>
+</nav>
+<div class="layout">
+  <aside class="sidenav">
+    <h3>Getting started</h3>
+    <a id="sv-intro" href="/docs" class="active">Introduction</a>
+    <a id="sv-install" href="/docs/install">Installation</a>
+    <a id="sv-keys" href="/docs/keys">API keys</a>
+    <h3>Core concepts</h3>
+    <div class="sub">
+      <a id="sv-sessions" href="/docs/sessions">Sessions</a>
+      <a id="sv-actions" href="/docs/actions">Actions</a>
+      <a id="sv-extract" href="/docs/extract">AXTree extract</a>
+      <a id="sv-creds" href="/docs/credentials">Credentials</a>
+    </div>
+    <h3>Advanced</h3>
+    <div class="sub">
+      <a id="sv-cdp" href="/docs/cdp">CDP compat</a>
+      <a id="sv-multi" href="/docs/multinode">Multi-node</a>
+      <a id="sv-fuzz" href="/docs/sanitizer">Sanitizer</a>
+    </div>
+  </aside>
+  <main class="content">
+    <nav class="breadcrumb"><a id="bc-home" href="/">Home</a> / <a id="bc-docs" href="/docs">Docs</a> / Introduction</nav>
+    <h1>Welcome to Acme Cloud</h1>
+    <p class="lead">Acme Cloud is a local-first automation platform for Apple Silicon. This guide walks you through your first session.</p>
+    <h2>What you'll build</h2>
+    <p>You'll create a headless browser session, navigate to a page, and extract its interactive structure as semantic Markdown — the input a downstream model uses to decide the next action.</p>
+    <h2>Prerequisites</h2>
+    <p>macOS 14 or later on Apple Silicon. The engine ships as a single binary with no external runtime dependencies.</p>
+    <div class="cta">
+      <div><h3>Ready to build?</h3><p style="color:#dbeafe;margin:4px 0 0">Start your first automation in minutes.</p></div>
+      <a id="cta-start" href="/docs/quickstart">Start the quickstart →</a>
+    </div>
+  </main>
+</div>
+<script>
+(function(){
+  var r=document.getElementById('tn-resources'),mega=document.getElementById('mega');
+  if(r&&mega){r.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();mega.classList.toggle('open')});document.addEventListener('click',function(){mega.classList.remove('open')})}
+  window.__analytics=window.__analytics||[];
+  function track(ev,props){window.__analytics.push({ev:ev,props:props,ts:Date.now()})}
+  track('docs_view',{path:location.pathname});
+  document.querySelectorAll('.sidenav a, .topnav .links a, .mega a, .breadcrumb a').forEach(function(a){a.addEventListener('click',function(){track('nav_click',{id:a.id,href:a.getAttribute('href')})})});
+  var s=document.getElementById('search');if(s){var t;s.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){track('search',{q:s.value})},400)})}
+  document.getElementById('signin').addEventListener('click',function(){track('signin_click')});
+  document.getElementById('signup').addEventListener('click',function(){track('signup_click')});
+})();
+</script>
+</body>
+</html>

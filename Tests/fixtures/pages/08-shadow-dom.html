@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Design system — Acme Cloud</title>
+<style>
+:root{--primary:#2563eb;--bg:#f1f5f9;--surface:#fff;--text:#0f172a;--muted:#64748b;--border:#e2e8f0}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;padding:24px}
+.app{max-width:900px;margin:0 auto}
+header{margin-bottom:20px}
+header h1{font-size:22px;font-weight:600}
+header p{color:var(--muted);font-size:13px;margin-top:4px}
+.toolbar{display:flex;gap:8px;margin-bottom:20px;align-items:center}
+.toolbar input{height:36px;flex:1;padding:0 12px;border:1px solid var(--border);border-radius:8px;font-size:14px}
+.btn{height:36px;padding:0 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);font-size:14px;cursor:pointer;text-decoration:none;color:var(--text)}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:18px}
+.card h3{font-size:15px;font-weight:600;margin-bottom:4px}
+.card p{font-size:13px;color:var(--muted);margin-bottom:12px}
+demo{display:block}
+@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header><h1>Design system playground</h1><p>Web-component widgets rendered in shadow DOM.</p></header>
+  <div class="toolbar">
+    <input id="search" placeholder="Filter components…">
+    <a class="btn" id="docs" href="/ds/docs">Docs</a>
+    <a class="btn primary" id="add" href="/ds/new">Add component</a>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>acme-button</h3><p>Primary action button.</p><demo id="d1"></demo></div>
+    <div class="card"><h3>acme-toggle</h3><p>Switch with label.</p><demo id="d2"></demo></div>
+    <div class="card"><h3>acme-search</h3><p>Input with icon.</p><demo id="d3"></demo></div>
+    <div class="card"><h3>acme-menu</h3><p>Dropdown menu.</p><demo id="d4"></demo></div>
+  </div>
+</div>
+<script>
+(function(){
+  // Open shadow roots: the walker probes element.shadowRoot (open mode) to reach
+  // interactive nodes inside. Closed roots are unreachable by design.
+  function mount(hostId, html){
+    var host=document.getElementById(hostId);
+    if(!host||!host.attachShadow) return;
+    var root=host.attachShadow({mode:'open'});
+    root.innerHTML='<style>:host{display:block}button{height:36px;padding:0 14px;border:1px solid #ccc;border-radius:8px;background:#fff;cursor:pointer;font-size:14px}button.primary{background:#2563eb;color:#fff;border-color:#2563eb}input{height:36px;padding:0 12px;border:1px solid #ccc;border-radius:8px;font-size:14px;width:100%}a{color:#2563eb;text-decoration:none;display:block;padding:6px 0}.row{display:flex;gap:8px;align-items:center}label{font-size:13px}</style>'+html;
+  }
+  mount('d1','<button id=sb1 class=primary>Save</button> <button id=sb2>Cancel</button>');
+  mount('d2','<div class=row><input id=st type=checkbox><label for=st>Enable feature</label></div>');
+  mount('d3','<input id=ss placeholder="Search…" type=search>');
+  mount('d4','<a id=sm1 href=#>Edit</a><a id=sm2 href=#>Duplicate</a><a id=sm3 href=#>Delete</a>');
+  window.__analytics=window.__analytics||[];
+  function track(ev,props){window.__analytics.push({ev:ev,props:props,ts:Date.now()})}
+  track('ds_view');
+  document.getElementById('search').addEventListener('input',function(){track('ds_search',{q:this.value})});
+  document.getElementById('docs').addEventListener('click',function(){track('ds_docs')});
+  document.getElementById('add').addEventListener('click',function(){track('ds_add')});
+})();
+</script>
+</body>
+</html>

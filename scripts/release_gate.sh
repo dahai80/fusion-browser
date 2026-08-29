@@ -24,8 +24,11 @@
 #        longrun_leak.py           (1000-action no-leak)
 #        uma_coexist.py            (UMA coexistence baseline)
 #        ownership_smoke.py        (B-5/E-34 session ownership: not_owner on cross-client op)
+#        perf_multipage.py         (R-7 10-page AXTree compression SLA ≥90%, hard gate)
 #      perf_bench.py is informational (perf, not correctness), NOT a hard gate —
 #      runs last and its failure is logged but non-fatal.
+#      multinode_smoke.py is informational (multi-process can be resource-flaky in CI; the
+#      capacity UNIT tests in NodeCapacityTests are the deterministic hard gate for H-9).
 #
 # Process data: each harness owns its cleanup (socket unlink, config restore).
 # This script cleans the shared smoke socket/config leftovers on exit.
@@ -85,6 +88,7 @@ HARD_HARNESSES=(
     "scripts/longrun_leak.py"
     "scripts/uma_coexist.py"
     "scripts/ownership_smoke.py"
+    "scripts/perf_multipage.py"
 )
 for h in "${HARD_HARNESSES[@]}"; do
     if [[ -f "$h" ]]; then
@@ -94,9 +98,9 @@ for h in "${HARD_HARNESSES[@]}"; do
     fi
 done
 
-# --- informational (non-fatal): perf ---
+# --- informational (non-fatal): perf + multinode ---
 if [[ "$SKIP_PERF" -eq 0 ]]; then
-    for h in "scripts/perf_bench.py"; do
+    for h in "scripts/perf_bench.py" "scripts/multinode_smoke.py"; do
         if [[ -f "$h" ]]; then
             info "informational (non-fatal): $h"
             if python3 "$h"; then
