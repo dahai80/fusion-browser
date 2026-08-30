@@ -61,6 +61,40 @@ ownership check is bypassed for this read-only query — it does NOT mean auth i
 3. **Route**: send the `create_session` to the chosen node's UDS socket.
 4. **Track**: a session lives on ONE node for its lifetime (no live migration here).
 
+## System-caller proxy bypass (R-10 — the per-call-dial ownership gap)
+
+The gateway is a **system/proxy caller** that mediates all its clients and dials a
+**fresh UDS connection per op** (per-call dial, no pooled conn — see client.go). Every
+other fusion-browser caller keeps ONE UDS connection for its lifetime, so the E-34
+per-connection `ownerId` (UUID minted at init) is stable across create/execute/close.
+The gateway's per-call dial breaks that: create's connection is ownerId=A, execute
+re-dials → ownerId=B → `not_owner` (503, session owned by another client).
+
+fusion-browser's E-34 ownership **intentionally bypasses** for a system caller
+(`ownerId == nil`) — that is how the CDP path already works (`CDPServer.ensureSession`
+creates with nil owner). The UDS path had no way to reach it. R-10 adds one:
+
+- **Operator config** `tokenSystemCaller: true` (`~/.fusion-browser/config.json` /
+  `FUSION_BROWSER_CONFIG`) designates the node's `authToken` as a system-caller token.
+- On auth success, `FBAuth.isSystemCaller(token:)` checks the token hash + the flag; if
+  true, the UDS connection sets `ownerId=nil` for create/execute/close → SessionManager
+  bypasses E-34 (deny only when session-owner AND caller both non-nil AND differ).
+- **Fail-closed**: flag absent / `false` → never system. A normal token never bypasses
+  ownership; client-to-client isolation is untouched. The flag is OPERATOR CONFIG, not
+  client-supplied — a client only sends the token it was given; it cannot self-elevate.
+- **Orthogonal to caps**: a system caller still needs its action caps
+  (`tokenCapabilities: ["all"]`) to drive sessions. Do not conflate ownership with
+  action permission.
+- **Trusted-proxy token only**: `tokenSystemCaller: true` bypasses client isolation.
+  Set it ONLY for the gateway's per-node token, never a per-client token. The gateway
+  is the single trusted proxy mediating all clients, so this is correct for R-10's
+  architecture.
+
+Without this flag, a per-call-dial proxy gets `not_owner` on every execute that
+follows a create on a different dial. This is the fusion-browser-side fix for the gap
+R-10 live verification surfaced; it is NOT the gateway #132 auth defect (that is
+separate, see the note below).
+
 ## What this side does NOT do (gateway-side, out of scope)
 
 - **No migration.** A session is pinned to the node that created it. Node-jetsam
@@ -105,14 +139,35 @@ fusion-gateway cross-node scheduling + migration: tracked in fusion-gateway
 (issue → PR → landed code, per monorepo rule). This contract doc is the input;
 the gateway implementation consumes `{type:"capacity"}` for placement.
 
-> **Auth-handshake defect (2026-08-30, filed).** fusion-gateway PR #131 (issue #130)
+> **Auth-handshake defect — RESOLVED (2026-08-30).** fusion-gateway PR #131 (issue #130)
 > landed the scheduler + proxy but its `NodeClient` dials and sends the request frame
 > WITHOUT the required auth handshake, and `BrowserNodeConfig` carries no node token.
-> Against a real fusion-browser node every op returns `auth_denied` → the poll marks
-> the node dead → the registry is empty → `POST /v1/browser/sessions` returns 503.
+> Against a real fusion-browser node every op returned `auth_denied` → the poll marked
+> the node dead → the registry was empty → `POST /v1/browser/sessions` returned 503.
 > The gateway's offline `fakenode` tests did not model auth, so CI stayed green while
-> the live path is broken. Fix (fusion-gateway-side): add `token` to
-> `BrowserNodeConfig`, send `{type:"auth",token}` + await `auth_ack` before each
-> request on the per-call dial (create/execute/close/capacity/metrics all need it).
-> This contract doc was corrected on 2026-08-30 to state the auth prerequisite
-> (the earlier draft omitted it, which is what misled the gateway implementation).
+> the live path was broken. Filed `dahai80/fusion-gateway#132`; **FIXED by PR #133**
+> (commit `565fa5c`): `token` added to `BrowserNodeConfig`, `NodeClient.authenticate`
+> sends `{type:"auth",token}` + asserts `auth_ack` on every per-call dial
+> (create/execute/close/capacity/metrics). R-10 live verification
+> (`scripts/verify_gateway_r10.py`) confirmed: no `auth_denied`, 201 creates served,
+> scheduler distributes sessions across nodes with stable config-label pins.
+>
+> **Ownership gap — fusion-browser-side fix landed + verified (2026-08-30).** With #132
+> fixed, the per-call-dial proxy then hit `not_owner` on execute (create's ownerId !=
+> execute's ownerId — see the "System-caller proxy bypass" section above). fusion-browser
+> added the `tokenSystemCaller` operator config so a designated proxy token bypasses E-34
+> ownership (mirrors the CDP nil-owner path). The harness config sets
+> `tokenSystemCaller: true` per node. **Re-verified end-to-end** by
+> `scripts/verify_gateway_r10.py` → PASS: 3 creates distributed across 2 nodes, proxied
+> screenshot returns a valid PNG, `report["ok"]==True`. The verification also surfaced and
+> fixed a pre-existing crash (E-40): a `create` with no `initial_url` left the WKWebView
+> blank → WebContent idled into ProcessThrottler suspension → the first screenshot raced
+> the suspend IPC → SIGTRAP exit 133; `create` now loads a minimal blank `data:` document
+> so WebContent never idles. This closes the last R-10 gap end-to-end.
+>
+> **Separate gateway admin-route defect (2026-08-30, advisory — not R-10).** The browser
+> admin routes `/v1/browser/nodes` + `/v1/browser/metrics` use `withAdminOnly` which
+> checks `middleware.IsAdmin` BEFORE the auth middleware runs, so an admin-login JWT
+> populates `admin.AdminClaims` but NOT `middleware.Principal` → 403. The verification
+> harness treats this as advisory (non-fatal) — it does not block R-10. Filed separately
+> against fusion-gateway; does not affect the UDS auth contract on this side.

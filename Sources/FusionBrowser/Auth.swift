@@ -32,6 +32,11 @@ public final class FBAuth {
     // hash(hex) -> capabilities. Keyed on hash so plaintext token leaves no heap footprint.
     private var tokenCaps: [String: FBCapabilities] = [:]
     private let log = FBLogger.shared
+    // R-10/B-5: operator flag designating the configured token as a system-caller
+    // token. When true, isSystemCaller(token:) returns true for a matching token so
+    // UDSServer passes ownerId=nil → SessionManager bypasses E-34 ownership (the
+    // per-call-dial proxy/scheduler case). OPERATOR CONFIG only, fail-closed false.
+    private let systemCaller: Bool
 
     // caps: capabilities granted to the registered token. Defaults to `.default`
     // (no evaluate — H-5 scoped-token model). An operator may elevate via the
@@ -39,7 +44,11 @@ public final class FBAuth {
     // evaluate action becomes reachable; without it evaluate is cap-gated off
     // (evaluate_denied). Fail-closed: an unknown cap name is dropped, never
     // broadens — `parseCaps(["bogus"])` yields the empty set, not .all.
-    public init(token: String?, caps: FBCapabilities = .default) {
+    // systemCaller: operator config `tokenSystemCaller` — designates this token as a
+    // system caller (bypasses E-34 ownership on UDS). Orthogonal to caps: a system
+    // caller still needs its action caps to drive sessions.
+    public init(token: String?, caps: FBCapabilities = .default, systemCaller: Bool = false) {
+        self.systemCaller = systemCaller
         if let t = token, !t.isEmpty {
             let digest = SHA256.hash(data: Data(t.utf8))
             self.expectedTokenHash = Array(digest)
@@ -94,6 +103,22 @@ public final class FBAuth {
         }
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         return queue.sync { tokenCaps[hex] ?? FBCapabilities.default }
+    }
+
+    // R-10/B-5: is the supplied token the operator-designated system-caller token?
+    // Returns true ONLY when the token hash matches the configured token AND
+    // `systemCaller` is true. Fail-closed on every other path: no token configured,
+    // empty/wrong token, or flag false → false. Reuses the same SHA256 + constant-time
+    // compare as authenticate (one connection, one auth — double-hash negligible).
+    // Signature kept separate from authenticate so CDPServer.verifyBearer + the test
+    // call sites need zero edits (the CDP path uses nil-owner already, no flag needed).
+    public func isSystemCaller(token: String?) -> Bool {
+        if !systemCaller { return false }
+        if expectedTokenHash.isEmpty { return false }
+        guard let t = token, !t.isEmpty else { return false }
+        let digest = SHA256.hash(data: Data(t.utf8))
+        let candidate = Array(digest)
+        return constantTimeEqual(candidate, expectedTokenHash)
     }
 
     // Constant-time byte compare. Length-mismatch is a public fact (digest size), not a
