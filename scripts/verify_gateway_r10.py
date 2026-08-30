@@ -383,20 +383,19 @@ def main():
                 report["phase"] = "pin_label_mismatch"
                 return False
         log(f"all pins are seeded config labels: {pins}")
-        # Advisory cross-check via the admin /v1/browser/nodes map: each config
-        # label SHOULD resolve to a live node whose polled capacity carries a
-        # process node_id UUID that is one of the 2 binaries we started (proves
-        # the config-label pin maps to a REAL engine process, not a phantom).
-        # NON-FATAL: this endpoint is admin-gated via server.withAdminOnly ->
-        # middleware.IsAdmin (Principal.EffectiveRole==RoleAdmin). The admin
-        # login JWT populates the admin module's OWN AdminClaims context
-        # (admin.WithAdminContext), NOT middleware.Principal — the two auth
-        # systems are not bridged on the /v1/browser/nodes path, so the route
-        # returns 403 even with a valid admin Bearer token. That is a SEPARATE
-        # gateway admin-route defect, NOT the #132 auth-handshake defect under
-        # test here. The #132 contract (auth handshake + capacity consumption +
-        # cross-node distribution) is already proven above by the 201 creates +
-        # distinct seeded-label pins. Record the map status as advisory only.
+        # Real pin via the admin /v1/browser/nodes map: each config label SHOULD
+        # resolve to a live node whose polled capacity carries a process node_id
+        # UUID that is one of the 2 binaries we started (proves the config-label
+        # pin maps to a REAL engine process, not a phantom). This endpoint is
+        # admin-gated via server.withAdminOnly -> middleware.IsAdmin. The admin
+        # Bearer is bridged to middleware.Principal by bridgeAdminJWT (fusion-
+        # gateway PR #138, merged 14feaab); before that fix the route returned
+        # 403 on a valid admin Bearer (advisory). The bridge is now landed, so a
+        # 403 here is a real FAILURE (admin auth regression), not advisory. The
+        # #132 core contract (auth handshake + capacity consumption + cross-node
+        # distribution) is already proven above by the 201 creates + distinct
+        # seeded-label pins; this admin map is the cross-check that each label
+        # maps to a real engine process UUID.
         nmap = None
         admin_map_ok = False
         admin_map_403 = False
@@ -412,25 +411,30 @@ def main():
                 report["admin_nodes_error"] = str(e)
         report["admin_map_403"] = admin_map_403
         if admin_map_403:
-            log("ADVISORY: GET /v1/browser/nodes -> 403 (admin JWT not bridged to "
-                "middleware.Principal on this route; separate gateway admin-route "
-                "defect, NOT #132). Skipping pin->process-uuid cross-check; the #132 "
-                "core contract is already proven by the 201 creates + cross-node pins.")
+            log("FAIL: GET /v1/browser/nodes -> 403 with a valid admin Bearer. "
+                "bridgeAdminJWT (fusion-gateway PR #138) should bridge the admin "
+                "JWT to middleware.Principal on this route. A 403 is now a real "
+                "admin-auth regression, not advisory. The #132 core contract is "
+                "already proven above by the 201 creates + cross-node pins, but "
+                "the admin node-map pin is broken.")
+            report["admin_map_cross_check"] = False
         elif not admin_map_ok or nmap is None:
             log("ADVISORY: admin nodes map unavailable; skipping pin->process-uuid cross-check")
         else:
             node_list = nmap if isinstance(nmap, list) else (nmap.get("nodes") or nmap.get("data") or [])
+            # handleNodes flattens capacity into the top-level node entry: the
+            # stable config label is `id`, the polled process UUID is `node_id`
+            # (== Capacity.NodeID). Before the first successful poll, `node_id`
+            # carries the config label (same as `id`) and capacity fields are 0;
+            # after the poll, `node_id` is the real engine-process UUID.
             label_to_uuid = {}
             for nd in node_list:
                 if not isinstance(nd, dict):
                     continue
-                label = nd.get("node_id") or nd.get("id")
-                cap = nd.get("capacity") or nd.get("capacity_payload") or {}
-                if isinstance(cap, dict):
-                    uuid = cap.get("node_id")
-                else:
-                    uuid = None
-                if label and uuid:
+                label = nd.get("id")
+                uuid = nd.get("node_id")
+                # Skip the pre-poll case where node_id == label (no real UUID yet).
+                if label and uuid and uuid != label:
                     label_to_uuid[label] = uuid
             report["label_to_uuid"] = label_to_uuid
             live_uuids = {nid1, nid2}

@@ -165,9 +165,14 @@ the gateway implementation consumes `{type:"capacity"}` for placement.
 > the suspend IPC → SIGTRAP exit 133; `create` now loads a minimal blank `data:` document
 > so WebContent never idles. This closes the last R-10 gap end-to-end.
 >
-> **Separate gateway admin-route defect (2026-08-30, advisory — not R-10).** The browser
-> admin routes `/v1/browser/nodes` + `/v1/browser/metrics` use `withAdminOnly` which
-> checks `middleware.IsAdmin` BEFORE the auth middleware runs, so an admin-login JWT
-> populates `admin.AdminClaims` but NOT `middleware.Principal` → 403. The verification
-> harness treats this as advisory (non-fatal) — it does not block R-10. Filed separately
-> against fusion-gateway; does not affect the UDS auth contract on this side.
+> **Gateway admin-route defect (2026-08-30, RESOLVED — fusion-gateway PR #138).** The
+> browser admin routes `/v1/browser/nodes` + `/v1/browser/metrics` use `withAdminOnly`
+> which checked `middleware.IsAdmin` BEFORE the auth middleware ran, so an admin-login
+> JWT populated `admin.AdminClaims` but NOT `middleware.Principal` → 403. Fixed upstream:
+> `bridgeAdminJWT` now validates the admin Bearer once and sets
+> `Principal{Role:RoleAdmin, AuthMethod:"admin-jwt"}` before the `IsAdmin` check, with
+> `APIKeyAuth`/`RBAC` short-circuiting on that auth method. Verified live: admin Bearer →
+> `/v1/browser/nodes` 200; negatives (no/garbage/non-admin-role Bearer) → 403. Squash-merged
+> `14feaab`, branch `fix/admin-only-jwt-bridge` deleted. The verification harness below
+> (`verify_gateway_r10.py`) now treats a non-200 admin node-map as a real FAILURE, not
+> advisory — the defect is gone. Does not affect the UDS auth contract on this side.
