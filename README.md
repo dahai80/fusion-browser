@@ -84,6 +84,22 @@ green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
   of auth-token identity).
 Build green, **210 tests pass** (198 + NodeCapacity + InjectionFuzz + E-14 credential).
 
+**R-10 system-caller bypass + blank-page crash fix landed (2026-08-30)** — closes the
+last enterprise-commercial gate. R-10 fusion-browser-side: operator config
+`tokenSystemCaller: true` designates the node `authToken` as a system-caller token so a
+per-call-dial proxy (fusion-gateway dials a fresh UDS connection per op) passes
+`ownerId: nil` on create/execute/close → SessionManager bypasses E-34 ownership (mirrors
+the CDP nil-owner path; SessionManager unchanged). Fail-closed default false; operator
+config only; orthogonal to caps; trusted-proxy token only. E-40 blank-page screenshot
+SIGTRAP: a `create` with no `initial_url` left the WKWebView blank → WebContent idled into
+ProcessThrottler suspension → the first screenshot raced the suspend IPC → SIGTRAP exit
+133 (crash report `fusion-browser-*-112437.ips`). Fix: `create` now loads a minimal
+`data:text/html,<html></html>` on main when no `initial_url` is given so WebContent renders
+and never idles into suspend. Verified by `scripts/verify_gateway_r10.py` → PASS (3 creates
+across 2 nodes + proxied screenshot PNG). Build green, **213 tests** pass (210 + 3
+`isSystemCaller` fail-closed unit tests; the E-40 crash is a live-WKWebView path, proven
+by the harness not a unit test, per ARCH-3).
+
 **Phase 1 landed**
 - Swift 6 SPM package, Headless/Headed WKWebView wrapper (`nonPersistent` dataStore isolation; WebContent process count bounded by the session cap + WebKit per-site isolation, not a shared pool — `WKProcessPool` deprecated macOS 12+, removed per B-2)
 - UDS server (POSIX socket + `DispatchSourceRead`, bypassing the unreliable `NWListener` AF_UNIX accept)
@@ -131,7 +147,7 @@ Build green, **210 tests pass** (198 + NodeCapacity + InjectionFuzz + E-14 crede
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 210 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 213 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 
@@ -155,11 +171,16 @@ JSON
 
 `logLevel`: debug/info/warn/error. Logs go to both `os_log` (Console.app, search `com.fusion.browser`) and stderr.
 
-Config keys: `socketPath`, `cdpEnabled`, `cdpPort`, `authToken`, `logLevel`, `allowedOrigins` (origin whitelist — empty is FAIL-CLOSED per E-15: EVALUATE, CDP navigate, and the CDP WS upgrade all deny on an empty list; local schemes data:/about:/blob: still navigate freely), `visualLocator` (T3.4 visual-grounding fallback, default off; enabling needs a VLM loaded in fusion-mlx first; sub-keys `endpoint`/`model`/`timeoutMs`/`enabled`), `memoryWatchdog` (P4-2 RSS self-restart, default off; sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`, action=`close_sessions`|`exit`), `guards` (FR-13 scheduling guards, sub-keys `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`). A leftover `useRustCore` key in an existing `~/.fusion-browser/config.json` is silently ignored (Codable drops unknown keys) — the Rust core was removed in E-17~20 / #68.
+Config keys: `socketPath`, `cdpEnabled`, `cdpPort`, `authToken`, `logLevel`, `allowedOrigins` (origin whitelist — empty is FAIL-CLOSED per E-15: EVALUATE, CDP navigate, and the CDP WS upgrade all deny on an empty list; local schemes data:/about:/blob: still navigate freely), `tokenCapabilities` (E-9/H-5, default empty → `.default`, no evaluate — string list elevating the token's action caps, e.g. `["evaluate"]`/`["all"]`; unknown names dropped fail-closed), `tokenSystemCaller` (R-10, default false — Bool designating the `authToken` as a system-caller token so a per-call-dial proxy/scheduler like fusion-gateway bypasses E-34 session ownership on UDS create/execute/close; OPERATOR CONFIG only, fail-closed, trusted-proxy token only, orthogonal to caps), `visualLocator` (T3.4 visual-grounding fallback, default off; enabling needs a VLM loaded in fusion-mlx first; sub-keys `endpoint`/`model`/`timeoutMs`/`enabled`), `memoryWatchdog` (P4-2 RSS self-restart, default off; sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`, action=`close_sessions`|`exit`), `guards` (FR-13 scheduling guards, sub-keys `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`). A leftover `useRustCore` key in an existing `~/.fusion-browser/config.json` is silently ignored (Codable drops unknown keys) — the Rust core was removed in E-17~20 / #68.
 
 P4-2 RSS self-restart enable example:
 ```json
 {"memoryWatchdog":{"enabled":true,"sampleIntervalMs":30000,"thresholdMB":200,"action":"close_sessions"}}
+```
+
+R-10 gateway proxy ownership-bypass enable example (`~/.fusion-browser/config.json` increment — trusted-proxy token only):
+```json
+{"tokenSystemCaller":true,"tokenCapabilities":["all"]}
 ```
 
 ## Verify Scripts (Phase 4)

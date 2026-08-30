@@ -86,6 +86,42 @@ final class AuthTests: XCTestCase {
         XCTAssertFalse(plain.authenticate(token: "t")!.contains(.evaluate),
                        "default token must still lack evaluate (H-5 scoped model)")
     }
+
+    // R-10/B-5: isSystemCaller fail-closed matrix. True ONLY when the token matches AND
+    // the operator set systemCaller=true. Every other path denies (no blanket bypass).
+    // The flag is operator config (FBAuth init), NOT client-supplied — a client only
+    // sends the token; it cannot self-elevate to system.
+    func testSystemCallerTrueOnlyOnMatchingTokenWithFlag() {
+        let sys = FBAuth(token: "proxy-token", caps: .all, systemCaller: true)
+        XCTAssertTrue(sys.isSystemCaller(token: "proxy-token"),
+                      "matching token + flag set → system")
+        // Wrong token → not system, even with flag set.
+        XCTAssertFalse(sys.isSystemCaller(token: "wrong-token"),
+                       "wrong token must not be system")
+        XCTAssertFalse(sys.isSystemCaller(token: "proxy-toke"),
+                       "near-miss token must not be system")
+        // Empty / nil token → not system.
+        XCTAssertFalse(sys.isSystemCaller(token: nil), "nil token not system")
+        XCTAssertFalse(sys.isSystemCaller(token: ""), "empty token not system")
+    }
+
+    // R-10: flag false (default) → never system, even with the correct token. Proves
+    // the bypass is opt-in operator config, not a blanket hole. Existing client-to-client
+    // isolation (E-34) is untouched unless the operator explicitly flags a token.
+    func testSystemCallerFalseByDefaultNeverSystem() {
+        let plain = FBAuth(token: "proxy-token", caps: .all)
+        XCTAssertFalse(plain.isSystemCaller(token: "proxy-token"),
+                       "flag false → never system even with correct token")
+        XCTAssertFalse(plain.isSystemCaller(token: nil), "flag false + nil → not system")
+    }
+
+    // R-10: no token configured → never system (deny-all sentinel has no system identity).
+    func testSystemCallerNoTokenConfiguredNeverSystem() {
+        let noTok = FBAuth(token: nil, caps: .all, systemCaller: true)
+        XCTAssertFalse(noTok.isSystemCaller(token: "proxy-token"),
+                       "no token configured → never system")
+        XCTAssertFalse(noTok.isSystemCaller(token: nil), "no token + nil → not system")
+    }
 }
 
 // R-3/B-3: metrics read path. FBMetrics.metricsArray() must surface counters +

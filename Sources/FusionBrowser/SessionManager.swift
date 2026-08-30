@@ -322,11 +322,20 @@ public final class FBSessionManager {
             // FR-06: WKWebView.load MUST run on main (calling it on the sessionmgr
             // background queue traps — observed exit 133 on create with initial_url).
             // Async: navigation completion is already async via WKNavigationDelegate.
-            if let url = req.initialUrl {
-                let navMs = watchdog.navigateMs
-                DispatchQueue.main.async {
-                    wv.navigate(url: url, timeoutMs: navMs)
-                }
+            // E-40: a NEVER-loaded blank webview idles into ProcessThrottler suspension;
+            // the first screenshot forces a render that races the suspend IPC and traps
+            // (sendPrepareToSuspendIPC -> ProcessThrottlerActivity::deref -> SIGTRAP exit
+            // 133, proven by crash report fusion-browser-*-112437.ips). The on-screen
+            // headless host window keeps a NAVIGATED page visible (no suspend); a blank
+            // page never paints, so WebContent suspends before any real load. Load a
+            // minimal blank document at create so WebContent renders immediately and
+            // never idles into suspend. Safe: data:about blank is the documented empty
+            // session baseline; callers that then navigate replace it. Fire-and-forget
+            // like the initial_url branch — no didFinish wait (create must not block).
+            let navUrl = req.initialUrl ?? "data:text/html,<html></html>"
+            let navMs = watchdog.navigateMs
+            DispatchQueue.main.async {
+                wv.navigate(url: navUrl, timeoutMs: navMs)
             }
             FBMetrics.shared.increment("session.created")
             // L-15: pin a STABLE first-session id. firstSession() used sessions.values.first

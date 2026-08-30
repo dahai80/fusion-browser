@@ -36,7 +36,30 @@ R-8 sanitizer combination-variant fuzz (`InjectionFuzzTests` — all 2^11 hidden
 subsets + render combos + adversarial-naming near-misses, pure deterministic), credential
 P2 (E-14 per-cookie logout deletes only this session's injected cookies by name|path not
 the whole domain; E-27 setCookie completion-handler + off-main wait returns true only
-after commit; E-39 cookie name masked in os_log). Build green, **210 tests** pass.
+after commit; E-39 cookie name masked in os_log). Build green, **213 tests** pass.
+
+**R-10 system-caller bypass + blank-page crash fix landed (2026-08-30)** — closes the
+last enterprise-commercial gate end-to-end. R-10 fusion-browser-side: operator config
+`tokenSystemCaller: true` designates the node `authToken` as a system-caller token so a
+per-call-dial proxy (fusion-gateway dials a fresh UDS connection per op) passes
+`ownerId: nil` on create/execute/close → SessionManager bypasses E-34 ownership (mirrors
+the CDP nil-owner path `CDPServer.ensureSession` already uses; SessionManager itself
+unchanged). Fail-closed default false; operator config only, never client-supplied;
+orthogonal to caps (still needs `tokenCapabilities: ["all"]`); trusted-proxy token only.
+`FBAuth.isSystemCaller(token:)` (separate from `authenticate`, signature stable). E-40
+blank-page screenshot SIGTRAP crash: a `create` with no `initial_url` left the WKWebView
+blank → WebContent idled → ProcessThrottler sent `sendPrepareToSuspendIPC` → the first
+screenshot forced a render that raced the suspend IPC → `ProcessThrottlerActivity::deref`
+→ SIGTRAP exit 133 (proven by crash report `fusion-browser-*-112437.ips`). The on-screen
+headless host window keeps a NAVIGATED page visible (no suspend); a blank page never
+paints so WebContent suspends before any real load. Fix: `create` now loads a minimal
+`data:text/html,<html></html>` when no `initial_url` is given, on main, fire-and-forget,
+so WebContent renders immediately and never idles into suspend. Verified by `scripts/
+verify_gateway_r10.py` → PASS (3 creates across 2 nodes + proxied screenshot PNG,
+`report["ok"]==True`); blank-page screenshot now returns a ~75KB PNG instead of crashing.
+Build green, **213 tests** pass (210 + 3 new `isSystemCaller` fail-closed unit tests;
+the E-40 blank-page crash is a live-WKWebView path, NOT unit-testable under `swift test`
+per ARCH-3 — proven live by the harness + a create-without-navigate-then-screenshot probe).
 
 Authoritative spec: `architecture/fusion-browser-prd-0826.md` (v2.0). Audit:
 `audit/fusion-browser-audit-0826.md`. This project's `README.md` documents the
@@ -47,7 +70,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 210 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 213 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -65,7 +88,7 @@ longrun_leak / verify_nonpersistent), not part of the build.
 
 B-6/R-6 CI: `.github/workflows/release-gate.yml` gates PRs to main. Two jobs —
 `build-and-test` (GitHub-hosted `macos-14` arm64: `swift build -c release` +
-`swift test --disable-sandbox`, the 210 deterministic tests, no GUI needed) and
+`swift test --disable-sandbox`, the 213 deterministic tests, no GUI needed) and
 `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]` runner with a
 GUI session: full `scripts/release_gate.sh` — 9 live harnesses incl
 `ownership_smoke.py`, needs a CoreGraphics display + main run loop for WKWebView).
@@ -109,10 +132,18 @@ self-heal, default OFF — sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/
 `mach_task_basic_info.resident_size`, one-shot breach fires drain-all-sessions
 or exit-for-supervisor-restart), `guards` (FR-13 scheduling guards, default
 `maxActions=200`/`taskTimeoutMs=300000`/`repeatActionBreak=3`/`rebuildDepthCap=1`).
-B-5/E-34: session ownership is AUTOMATIC — no config key. Every UDS connection
-mints a UUID owner id at init; `create` records it, `execute`/`close` verify it
-(`not_owner` on mismatch). System callers (nil owner) bypass. E-35 in-flight
-batch cap (`maxBatch=64`) is also fixed, not configurable — a fairness guard.
+B-5/E-34: session ownership is AUTOMATIC. Every UDS connection mints a UUID owner id
+at init; `create` records it, `execute`/`close` verify it (`not_owner` on mismatch).
+System callers (nil owner) bypass. R-10 added the `tokenSystemCaller` config key (Bool,
+default false) so an operator-designated **proxy/scheduler token** runs as a system
+caller — a UDS connection authenticating with that token passes `ownerId=nil` to
+create/execute/close, bypassing E-34. Needed because fusion-gateway dials a fresh UDS
+conn per op (per-call dial), so create's ownerId != execute's ownerId → `not_owner`
+without the bypass; it mirrors the nil-owner path CDP already uses. OPERATOR CONFIG
+only (not client-supplied), fail-closed default false, orthogonal to caps (a system
+caller still needs `tokenCapabilities: ["all"]` to drive sessions). Set ONLY for a
+trusted proxy token — it bypasses client isolation. E-35 in-flight batch cap
+(`maxBatch=64`) is fixed, not configurable — a fairness guard.
 E-23: `rebuildDepth` counts ONLY real replays — `handleCrash` checks `isIdempotent`
 FIRST and calls `scheduler.canRebuild()` (which increments) only on the idempotent
 replay branch; a non-idempotent crash (navigate/click/type/evaluate) fails directly
@@ -151,6 +182,28 @@ The six infra modules (each a single file, see README source map):
 
 - **WKWebView & NSWindow must be created on the main thread.** `SessionManager.create`
   dispatches to `DispatchQueue.main.sync` when off-main. Violating hangs forever.
+- **E-40: a `create` with no `initial_url` MUST still load a minimal blank document.**
+  A never-loaded blank WKWebView idles into WebKit ProcessThrottler suspension; the first
+  screenshot forces a render that races the suspend IPC → `ProcessThrottlerActivity::deref`
+  → SIGTRAP exit 133 (proven by crash report `fusion-browser-*-112437.ips`). The on-screen
+  headless host window keeps a NAVIGATED page's visibilityState "visible" (no suspend), but
+  a blank page never paints so WebContent suspends before any real load. `SessionManager.create`
+  therefore loads `data:text/html,<html></html>` on main (fire-and-forget, no didFinish wait)
+  when `initialUrl` is nil. Do NOT remove this blank-load — a `create`-then-`screenshot`
+  caller (e.g. `scripts/verify_gateway_r10.py`) will crash the engine without it. The crash
+  is live-WKWebView-only (not reproducible under `swift test`, ARCH-3); it is proven by the
+  harness + a create-without-navigate-then-screenshot probe, not a unit test.
+- **R-10 system-caller bypass (token-controlled).** Operator config `tokenSystemCaller: true`
+  designates the node `authToken` as a system-caller token. On auth success,
+  `FBAuth.isSystemCaller(token:)` (separate from `authenticate`, signature STABLE — zero
+  CDP/test blast radius) checks the token hash + the flag; if true, `FBClientConnection`
+  passes `ownerId: nil` to create/execute/close → SessionManager bypasses E-34 ownership
+  (deny only when session-owner AND caller both non-nil AND differ). Fail-closed default
+  false; operator config ONLY (never client-supplied); orthogonal to caps (still needs
+  `tokenCapabilities: ["all"]`); trusted-proxy token ONLY. Needed because fusion-gateway
+  is a per-call-dial proxy (fresh UDS connection per op) — without it create's ownerId=A,
+  execute re-dials → ownerId=B → `not_owner`. Mirrors the CDP nil-owner path
+  (`CDPServer.ensureSession`). Do NOT conflate ownership with action permission.
 - **Client connections must be strongly retained.** `ObjectIdentifier` keys in a
   `Set` do NOT retain — store the object itself in `[ObjectIdentifier: FBClientConnection]`
   or the `DispatchSourceRead` handler never fires. (Hard-won fix.)
@@ -172,6 +225,20 @@ The six infra modules (each a single file, see README source map):
   the caller is non-nil AND they differ. CDP's single-tenant shim leaves owner nil
   (no per-client isolation). Live-pinned by `scripts/ownership_smoke.py` (two
   connections: B's execute+close on A's session → `not_owner`; A keeps full control).
+- **R-10/B-5 system-caller bypass: a per-call-dial proxy (fusion-gateway) re-dials UDS
+  per op, so create's `ownerId` != execute's `ownerId` → `not_owner`.** The fix is a
+  token-controlled bypass: operator config `tokenSystemCaller: true` designates the
+  node's `authToken` as a system-caller token. On auth success `FBAuth.isSystemCaller`
+  (separate from `authenticate`, signature kept stable so CDP `verifyBearer` + tests
+  need no edits) returns true only when the token hash matches + the flag is set; the
+  `FBClientConnection` then passes `ownerId: nil` (`effectiveOwner`) to create/execute/
+  close → SessionManager bypasses E-34 via the SAME nil-owner path CDP uses. Fail-closed
+  default false (a normal token never bypasses; existing isolation untouched). OPERATOR
+  CONFIG only — a client cannot self-elevate (it only sends the token it was given).
+  Orthogonal to caps: a system caller still needs `tokenCapabilities: ["all"]` to drive
+  sessions. Set ONLY for a trusted proxy token (bypasses client isolation). The harness
+  sets it per node (`scripts/verify_gateway_r10.py`). Deterministic hard gate:
+  `AuthTests.testSystemCaller*` in `InfraTests.swift`; live-pinned by the R-10 harness.
 - **B-5/E-35 per-client in-flight batch cap: `onReadable` processes at most
   `maxBatch=64` frames per read.** A 64KB recv can carry ~2000 small frames; without
   the cap that queues 2000 blocking `driver.execute` on main in one burst. Excess

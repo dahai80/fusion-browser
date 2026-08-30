@@ -81,7 +81,11 @@ func runEngine() {
     // (default) → .default (no evaluate); ["all"] → full caps. Unknown names
     // dropped fail-closed by FBAuth.parseCaps.
     let tokenCaps = FBAuth.parseCaps(cfg.tokenCapabilities)
-    let auth = FBAuth(token: cfg.authToken, caps: tokenCaps.isEmpty ? .default : tokenCaps)
+    let auth = FBAuth(token: cfg.authToken, caps: tokenCaps.isEmpty ? .default : tokenCaps,
+                      systemCaller: cfg.tokenSystemCaller)
+    if cfg.tokenSystemCaller {
+        log.info("Main", "token system-caller bypass on (operator config tokenSystemCaller=true) — UDS ownership bypassed for this token (proxy/scheduler)")
+    }
     let creds = FBCredentialManager()
     let sanitizer = FBSanitizer()
     let watchdog = cfg.watchdog.policy()

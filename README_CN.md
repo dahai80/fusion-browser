@@ -19,6 +19,8 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 - **凭据 P2** — E-14 注销仅删本会话注入的 cookie（按 name|path），不再删整域（两个同域会话不再互踩）；E-27 `setCookie` 用 completion 回调 + 离主线程等待（提交后才返 true，非提前）；E-39 cookie `name` 在 os_log 脱敏（原 `%{public}` 泄露 auth-token 身份）。
 编译通过，**210 单元测试通过**（198 + NodeCapacity + InjectionFuzz + E-14 凭据）。
 
+**R-10 system-caller 旁路 + 空白页崩溃修复已落地（2026-08-30）** — 闭合最后一个企业级商用门槛。R-10 本侧：operator 配置 `tokenSystemCaller: true` 将节点 `authToken` 标为 system-caller token，使按调用拨号（per-call dial，fusion-gateway 每次操作新建 UDS 连接）的代理在 create/execute/close 上传 `ownerId: nil` → SessionManager 绕过 E-34 会话归属（镜像 CDP nil-owner 路径；SessionManager 本身不变）。fail-closed 默认 false；仅 operator 配置；与 caps 正交；仅限可信代理 token。E-40 空白页截图 SIGTRAP：`create` 不带 `initial_url` 时 WKWebView 保持空白 → WebContent 空闲进入 ProcessThrottler 挂起 → 首次截图与挂起 IPC 竞态 → SIGTRAP exit 133（崩溃报告 `fusion-browser-*-112437.ips`）。修复：`create` 在无 `initial_url` 时于主线程加载最小 `data:text/html,<html></html>`，使 WebContent 立即渲染、不进入挂起。经 `scripts/verify_gateway_r10.py` 验收 → PASS（3 创建跨 2 节点 + 代理截图 PNG）。编译通过，**213 单元测试通过**（210 + 3 个 `isSystemCaller` fail-closed 单测；E-40 崩溃为 live-WKWebView 路径，经活验收脚本证明而非单测，按 ARCH-3）。
+
 **Phase 1 已落地**
 - Swift 6 SPM 包，Headless/Headed WKWebView 封装（`nonPersistent` dataStore 隔离；WebContent 进程数由 session 上限 + WebKit 站点级隔离约束，非共享进程池——`WKProcessPool` macOS 12+ 已弃用，按 B-2 移除）
 - UDS 服务端（POSIX socket + `DispatchSourceRead`，绕开 `NWListener` AF_UNIX accept 不可靠问题）
@@ -66,7 +68,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug（纯 Swift，无插件）
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 183 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
+swift test --disable-sandbox   # 213 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
 swift test --disable-sandbox --filter CDPServerTests   # 单个测试套
 ```
 
@@ -90,7 +92,12 @@ JSON
 
 `logLevel`：debug/info/warn/error。日志同时写 `os_log`（Console.app 可查 `com.fusion.browser`）与 stderr。
 
-配置键：`socketPath`、`cdpEnabled`、`cdpPort`、`authToken`、`logLevel`、`allowedOrigins`（EVALUATE origin 白名单，空=不限）、`visualLocator`（T3.4 视觉定位兜底，默认关；启用需先在 fusion-mlx 加载 VLM，子键 `endpoint`/`model`/`timeoutMs`/`enabled`）、`memoryWatchdog`（P4-2 RSS 自重启，默认关；子键 `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`，action=`close_sessions`|`exit`）、`guards`（FR-13 调度护栏，子键 `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`）。遗留的 `useRustCore` 键在现有 `~/.fusion-browser/config.json` 中会被静默忽略（Codable 丢弃未知键）——Rust 核心已在 E-17~20 / #68 移除。
+配置键：`socketPath`、`cdpEnabled`、`cdpPort`、`authToken`、`logLevel`、`allowedOrigins`（EVALUATE origin 白名单——空=FAIL-CLOSED（E-15）：EVALUATE、CDP navigate、CDP WS 升级遇空列表一律拒绝；本地 scheme data:/about:/blob: 仍可导航）、`tokenCapabilities`（E-9/H-5，默认空→`.default`，无 evaluate——提升 token 动作能力的字符串列表，如 `["evaluate"]`/`["all"]`；未知名 fail-closed 丢弃）、`tokenSystemCaller`（R-10，默认 false——将 `authToken` 标为 system-caller token，使 fusion-gateway 这类按调用拨号（per-call dial）的代理/调度器在 UDS create/execute/close 上绕过 E-34 会话归属；仅 OPERATOR 配置，fail-closed，仅限可信代理 token，与 caps 正交）、`visualLocator`（T3.4 视觉定位兜底，默认关；启用需先在 fusion-mlx 加载 VLM，子键 `endpoint`/`model`/`timeoutMs`/`enabled`）、`memoryWatchdog`（P4-2 RSS 自重启，默认关；子键 `enabled`/`sampleIntervalMs`/`thresholdMB`/`action`，action=`close_sessions`|`exit`）、`guards`（FR-13 调度护栏，子键 `maxActions`/`taskTimeoutMs`/`repeatActionBreak`/`rebuildDepthCap`）。遗留的 `useRustCore` 键在现有 `~/.fusion-browser/config.json` 中会被静默忽略（Codable 丢弃未知键）——Rust 核心已在 E-17~20 / #68 移除。
+
+R-10 网关代理归属绕过启用示例（`~/.fusion-browser/config.json` 增量——仅给可信代理 token）：
+```json
+{"tokenSystemCaller":true,"tokenCapabilities":["all"]}
+```
 
 P4-2 RSS 自重启启用示例：
 ```json

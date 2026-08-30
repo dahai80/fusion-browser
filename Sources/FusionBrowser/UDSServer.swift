@@ -123,7 +123,16 @@ final class FBClientConnection {
     // recorded on every session this client creates and verified on execute/close. Lets the
     // route deny a client operating another client's session (not_owner) without trusting fd
     // reuse or socket identity.
+    // R-10: a system-caller token (operator config `tokenSystemCaller`) makes this connection
+    // pass ownerId=nil to create/execute/close so SessionManager bypasses E-34 ownership —
+    // the per-call-dial proxy/scheduler case (fusion-gateway dials a fresh UDS conn per op,
+    // so create's ownerId != execute's ownerId → not_owner without the bypass). Mirrors the
+    // nil-owner path CDP already uses. ownerId stays the non-system identity for logging;
+    // effectiveOwner returns nil when isSystemCaller is on.
     private let ownerId: String
+    // R-10: set true on auth success when the token is the operator-designated system-caller
+    // token. Drives effectiveOwner (nil → SessionManager bypass).
+    private var isSystemCaller = false
     // B-5/E-35: per-client in-flight batch cap. onReadable bounds the frames processed per
     // read so a 64KB recv (~2000 small frames) cannot queue 2000 blocking driver.execute on
     // main in one shot. Excess complete frames are buffered here and drained on subsequent
@@ -235,7 +244,10 @@ final class FBClientConnection {
                 }
                 authed = true
                 caps = c
-                log.info("Client", "auth ok caps=\(c.rawValue)")
+                // R-10: detect a system-caller token so the route passes nil ownerId and
+                // SessionManager bypasses E-34 ownership (per-call-dial proxy case).
+                self.isSystemCaller = auth.isSystemCaller(token: authMsg.token)
+                log.info("Client", "auth ok caps=\(c.rawValue) systemCaller=\(isSystemCaller)")
                 sendAuthed()
                 return
             }
@@ -253,9 +265,12 @@ final class FBClientConnection {
     }
 
     private func route(_ req: FBRequest) {
+        // R-10: effective owner is nil for a system-caller token (SessionManager bypass),
+        // else this connection's UUID. System callers operate any session (proxy/scheduler).
+        let effectiveOwner: String? = isSystemCaller ? nil : ownerId
         switch req {
         case .createSession(let r):
-            switch manager.create(req: r, traceId: req.traceId, ownerId: ownerId) {
+            switch manager.create(req: r, traceId: req.traceId, ownerId: effectiveOwner) {
             case .success(let cr): send(resp: .createSession(cr))
             case .failure(let e): send(error: e)
             }
@@ -271,7 +286,7 @@ final class FBClientConnection {
             // B-5/E-34: owner-aware get. A client may only execute on sessions it created
             // (or system-owned sessions). Mismatch -> not_owner (not sessionNotFound, so the
             // caller can distinguish "doesn't exist" from "not yours" for audit/telemetry).
-            switch manager.get(r.sessionId, ownerId: ownerId) {
+            switch manager.get(r.sessionId, ownerId: effectiveOwner) {
             case .success(let session):
                 // H-5: pass the token's actual caps to the driver (authoritative per-action gate).
                 let state = driver.execute(session: session, req: r, caps: caps)
@@ -283,7 +298,7 @@ final class FBClientConnection {
             // if a navigate-only client can tear down any session by id).
             guard caps.contains(.close) else { send(error: .authDenied); return }
             // B-5/E-34: owner-aware close. A client cannot tear down another client's session.
-            let err = manager.close(sessionId: sid, ownerId: ownerId)
+            let err = manager.close(sessionId: sid, ownerId: effectiveOwner)
             if let e = err { send(error: e) }
             else { send(resp: .closed(sessionId: sid)) }
         case .metrics:

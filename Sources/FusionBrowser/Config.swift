@@ -235,6 +235,15 @@ public struct FBEngineConfig: Codable {
     // reachable; without it evaluate is cap-gated off (evaluate_denied). Unknown
     // names dropped fail-closed. Parsed by FBAuth.parseCaps at startup.
     public var tokenCapabilities: [String]
+    // R-10/B-5: flag the configured authToken as a system-caller token. When true, a
+    // UDS connection authenticating with this token passes ownerId=nil to the manager
+    // (create/execute/close), so SessionManager bypasses E-34 ownership — the
+    // per-call-dial proxy/scheduler case (fusion-gateway dials a fresh UDS conn per op,
+    // so create's ownerId != execute's ownerId → not_owner without this). Mirrors the
+    // nil-owner bypass CDP already uses. OPERATOR CONFIG ONLY (not client-supplied),
+    // fail-closed default false; set ONLY for a trusted proxy token. See
+    // docs/multinode-contract.md + UDSServer.swift.
+    public var tokenSystemCaller: Bool
     public var allowedOrigins: [String]
     public var quota: FBResourceQuota
     public var guards: FBSchedulingGuards
@@ -254,6 +263,7 @@ public struct FBEngineConfig: Codable {
     public init(socketPath: String = "/tmp/fusion-browser.sock",
                 cdpPort: Int = 9222, cdpEnabled: Bool = false,
                 authToken: String? = nil, tokenCapabilities: [String] = [],
+                tokenSystemCaller: Bool = false,
                 allowedOrigins: [String] = [],
                 quota: FBResourceQuota = .forHost(),
                 guards: FBSchedulingGuards = FBSchedulingGuards(),
@@ -268,6 +278,7 @@ public struct FBEngineConfig: Codable {
         self.cdpEnabled = cdpEnabled
         self.authToken = authToken
         self.tokenCapabilities = tokenCapabilities
+        self.tokenSystemCaller = tokenSystemCaller
         self.allowedOrigins = allowedOrigins
         self.quota = quota
         self.guards = guards
@@ -282,7 +293,7 @@ public struct FBEngineConfig: Codable {
     public static let `default` = FBEngineConfig()
 
     enum CodingKeys: String, CodingKey {
-        case socketPath, cdpPort, cdpEnabled, authToken, tokenCapabilities, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog, sessionReaper, rateLimit
+        case socketPath, cdpPort, cdpEnabled, authToken, tokenCapabilities, tokenSystemCaller, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog, sessionReaper, rateLimit
     }
 
     public init(from decoder: Decoder) throws {
@@ -293,6 +304,7 @@ public struct FBEngineConfig: Codable {
         cdpEnabled = try c.decodeIfPresent(Bool.self, forKey: .cdpEnabled) ?? d.cdpEnabled
         authToken = try c.decodeIfPresent(String.self, forKey: .authToken) ?? d.authToken
         tokenCapabilities = try c.decodeIfPresent([String].self, forKey: .tokenCapabilities) ?? d.tokenCapabilities
+        tokenSystemCaller = try c.decodeIfPresent(Bool.self, forKey: .tokenSystemCaller) ?? d.tokenSystemCaller
         allowedOrigins = try c.decodeIfPresent([String].self, forKey: .allowedOrigins) ?? d.allowedOrigins
         quota = try c.decodeIfPresent(FBResourceQuota.self, forKey: .quota) ?? d.quota
         guards = try c.decodeIfPresent(FBSchedulingGuards.self, forKey: .guards) ?? d.guards
