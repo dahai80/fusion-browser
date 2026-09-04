@@ -9,6 +9,24 @@ import Foundation
 // Mapping lives in-process per session, keyed by synthetic @eN id.
 // Next action resolves @eN -> live node via WeakRef; dead -> node_stale (no silent fail).
 
+// Issue #9: bounding box for SOM / visual grounding. Populated by the walker
+// (getBoundingClientRect) for every interactive node. Optional + additive — nil
+// only if the walker somehow omits it (never in practice). Snake_case wire keys
+// (x/y/width/height) so the Python client + CDP consumers read it directly.
+public struct FBBBox: Codable, Equatable {
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+}
+
 public struct FBExtractedNode: Codable, Equatable {
     public var nodeId: String
     public var role: String
@@ -20,10 +38,12 @@ public struct FBExtractedNode: Codable, Equatable {
     // T2.2: visibility audit flags (rule -> true if matched) + render-based hidden flag.
     public var hiddenFlags: [String: Bool]
     public var renderHidden: Bool
+    // Issue #9: viewport-relative bounding box (getBoundingClientRect). Additive.
+    public var bbox: FBBBox?
 
     public init(nodeId: String, role: String, name: String, isDisabled: Bool,
                 currentValue: String, fingerprint: String, docPath: String,
-                hiddenFlags: [String: Bool], renderHidden: Bool) {
+                hiddenFlags: [String: Bool], renderHidden: Bool, bbox: FBBBox? = nil) {
         self.nodeId = nodeId
         self.role = role
         self.name = name
@@ -33,6 +53,7 @@ public struct FBExtractedNode: Codable, Equatable {
         self.docPath = docPath
         self.hiddenFlags = hiddenFlags
         self.renderHidden = renderHidden
+        self.bbox = bbox
     }
 }
 
@@ -199,9 +220,12 @@ public enum FBWalkerScript {
         }
         var fp=fingerprint(el);
         var id="e"+(nextId++);
+        // Issue #9: capture viewport-relative bbox for SOM/visual grounding.
+        var r=el.getBoundingClientRect();
+        var bbox={x:r.left, y:r.top, width:r.width, height:r.height};
         var node={nodeId:id, role:roleOf(el), name:name, isDisabled:isDisabled,
                   currentValue:val, fingerprint:fp, docPath:docPath(el),
-                  hiddenFlags:sh, renderHidden:rh};
+                  hiddenFlags:sh, renderHidden:rh, bbox:bbox};
         // T2.2 purge: hide text content but keep node if interactive+visible.
         // L-4: a hidden (display:none / offscreen / render-covered) node must NOT be
         // actionable. The old code still did window.__fbMap.set(id, WeakRef(el)) for

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fusion-browser-client"
+version = "0.1.0"
+description = "Python client for the fusion-browser UDS JSON-RPC server"
+requires-python = ">=3.11"
+authors = [{ name = "dahai80" }]
+readme = "README.md"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[tool.setuptools.packages.find]
+include = ["fusion_browser_client*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

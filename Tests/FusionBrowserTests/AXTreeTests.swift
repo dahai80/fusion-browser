@@ -39,6 +39,34 @@ final class AXTreeReducerTests: XCTestCase {
         XCTAssertTrue(w.isDisabled)
         XCTAssertEqual(w.name, "忘记密码")
     }
+
+    // Issue #9: bbox threads FBExtractedNode -> AXTreeNode (wire) for SOM/visual grounding.
+    func testToWireNodePreservesBBox() {
+        let n = FBExtractedNode(nodeId: "e6", role: "button", name: "Go", isDisabled: false,
+                                currentValue: "", fingerprint: "button", docPath: "p",
+                                hiddenFlags: [:], renderHidden: false,
+                                bbox: FBBBox(x: 10, y: 20, width: 100, height: 40))
+        let w = FBAXTreeReducer.toWireNode(n)
+        XCTAssertEqual(w.bbox?.x, 10)
+        XCTAssertEqual(w.bbox?.y, 20)
+        XCTAssertEqual(w.bbox?.width, 100)
+        XCTAssertEqual(w.bbox?.height, 40)
+    }
+
+    // Issue #9: AXTreeNode Codable round-trip emits snake_case-free numeric bbox; a node
+    // without bbox decodes to nil (backward compat — additive field).
+    func testAXTreeNodeBBoxCodableRoundTrip() throws {
+        let node = AXTreeNode(nodeId: "e7", role: "link", name: "x", isDisabled: false,
+                              currentValue: "", bbox: FBBBox(x: 1.5, y: 2.5, width: 3, height: 4))
+        let data = try JSONEncoder().encode(node)
+        let decoded = try JSONDecoder().decode(AXTreeNode.self, from: data)
+        XCTAssertEqual(decoded.bbox, node.bbox)
+
+        let noBbox = AXTreeNode(nodeId: "e8", role: "link", name: "y", isDisabled: false, currentValue: "")
+        let data2 = try JSONEncoder().encode(noBbox)
+        let decoded2 = try JSONDecoder().decode(AXTreeNode.self, from: data2)
+        XCTAssertNil(decoded2.bbox)
+    }
 }
 
 final class SanitizerTests: XCTestCase {

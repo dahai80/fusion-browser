@@ -37,13 +37,19 @@ public struct AXTreeNode: Codable, Equatable {
     public var name: String
     public var isDisabled: Bool
     public var currentValue: String
+    // Issue #9: viewport-relative bounding box (getBoundingClientRect). Additive,
+    // optional for backward compat (nil only if source omitted it). Lets SOM /
+    // visual-grounding consumers draw overlays without a re-walk.
+    public var bbox: FBBBox?
 
-    public init(nodeId: String, role: String, name: String, isDisabled: Bool, currentValue: String) {
+    public init(nodeId: String, role: String, name: String, isDisabled: Bool,
+                currentValue: String, bbox: FBBBox? = nil) {
         self.nodeId = nodeId
         self.role = role
         self.name = name
         self.isDisabled = isDisabled
         self.currentValue = currentValue
+        self.bbox = bbox
     }
 }
 
