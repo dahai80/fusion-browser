@@ -60,7 +60,7 @@ public final class FBAXTreeExtractor {
 public enum FBAXTreeReducer {
     public static func toWireNode(_ n: FBExtractedNode) -> AXTreeNode {
         return AXTreeNode(nodeId: n.nodeId, role: n.role, name: n.name,
-                          isDisabled: n.isDisabled, currentValue: n.currentValue)
+                          isDisabled: n.isDisabled, currentValue: n.currentValue, bbox: n.bbox)
     }
 
     // Compact Markdown: one line per node. Header + nodes only (no style noise).

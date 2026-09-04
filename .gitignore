@@ -6,3 +6,8 @@
 DerivedData/
 .fusion-browser/
 scripts/*-report.json
+
+# Python client build artifacts
+client/python/**/__pycache__/
+client/python/*.egg-info/
+client/python/.pytest_cache/
