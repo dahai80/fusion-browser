@@ -61,6 +61,21 @@ Build green, **213 tests** pass (210 + 3 new `isSystemCaller` fail-closed unit t
 the E-40 blank-page crash is a live-WKWebView path, NOT unit-testable under `swift test`
 per ARCH-3 — proven live by the harness + a create-without-navigate-then-screenshot probe).
 
+**Python client + per-node bbox landed (2026-09-05, v0.2.1)** — closes #8 + #9. #8: a
+maintained Python client at `client/python/fusion_browser_client/` (pure-socket, no PyO3,
+mirrors `scripts/smoke_client.py`'s codec) so Python siblings (fusion-osagent, fusion-cowork)
+drive the browser without reverse-engineering the wire schema. Reads **snake_case** wire keys
+(engine uses `.convertToSnakeCase`/`.convertFromSnakeCase`). Ops: create/execute/navigate/
+click/type_text/scroll/screenshot/evaluate/close/metrics/capacity. 9 deterministic unit tests
+(fake UDS server) + live-verified (create+navigate+screenshot+close, 3 nodes + 82KB PNG).
+Documents the `create_session(initial_url=...)` fire-and-forget race (E-40): use
+`create_session()` + `navigate(url)` when the page must be loaded before the next action.
+#9: viewport-relative `bbox` (`getBoundingClientRect`) on every `AXTreeNode` for SOM /
+visual-grounding overlays — `FBBBox` struct + `bbox?` on `FBExtractedNode`/`AXTreeNode`,
+populated in the existing walker (already computed `getBoundingClientRect` for the visibility
+audit). Additive, backward compatible (nil when absent); `toWireNode` threads it through.
+2 new AXTree unit tests. Build green, **215 tests** pass (213 + 2 new). Patch release `v0.2.1`.
+
 Authoritative spec: `architecture/fusion-browser-prd-0826.md` (v2.0). Audit:
 `audit/fusion-browser-audit-0826.md`. This project's `README.md` documents the
 landed scope, source map, and protocol shape in detail.
@@ -70,7 +85,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 213 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 215 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
