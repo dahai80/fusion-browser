@@ -354,7 +354,17 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         let sem = DispatchSemaphore(value: 0)
         var out: Any? = nil
-        webView?.evaluateJavaScript(script) { result, _ in
+        webView?.evaluateJavaScript(script) { result, error in
+            if result == nil, let err = error {
+                // A-1 follow-up: a nil result is indistinguishable from a timeout at the
+                // caller — log the JS exception here so a broken injected script (syntax
+                // error, runtime throw) is diagnosable instead of surfacing as a bare
+                // "resolver no/invalid answer" internal_error.
+                let nsErr = err as NSError
+                let jsMsg = (nsErr.userInfo["WKJavaScriptExceptionMessage"] as? String) ?? err.localizedDescription
+                let jsLine = (nsErr.userInfo["WKJavaScriptExceptionLine"] as? Int) ?? -1
+                self.log.error("WebView", "evaluateJavaScript failed sess=\(self.sessionId) line=\(jsLine) err=\(jsMsg) scriptLen=\(script.count)")
+            }
             out = result
             sem.signal()
         }
@@ -407,9 +417,15 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     public func evaluateJSSyncArgs(_ script: String, args: [String], timeoutMs: Int = 5_000) -> Any? {
         var js = script
         for a in args {
-            guard let tokenData = try? JSONSerialization.data(withJSONObject: [a]),
-                  let tokenArr = try? JSONSerialization.jsonObject(with: tokenData) as? [String],
-                  let escaped = tokenArr.first else {
+            // JSONEncoder on the bare String emits a COMPLETE JSON string literal
+            // (`"e1"` — quotes + escaping included). The old round-trip through
+            // JSONSerialization([a]) took tokenArr.first — the UNQUOTED string — and
+            // interpolated it bare: `var id=e4` -> SyntaxError ("Left hand side of '='
+            // must be a reference") on EVERY resolver script. The old ActionDriver
+            // silently fell through on a nil resolver answer, so live clicks/types were
+            // no-ops reported as success (latent until the 1016-audit A-1 fail-loud
+            // change surfaced it). JSONEncoder is the one-call fix.
+            guard let escaped = try? String(data: JSONEncoder().encode(a), encoding: .utf8) else {
                 log.warn("WebView", "arg JSON-serialize failed, dropping arg sess=\(sessionId)")
                 continue
             }
