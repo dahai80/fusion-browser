@@ -125,10 +125,17 @@ public final class FBSession {
         webviewField = nil
         webviewLock.unlock()
         if let wv = wv {
+            // C-2 (1016 audit): teardown hops to main ASYNC. The old main.sync from a
+            // background caller deadlocked when main was itself blocked on something that
+            // needed the caller's queue (lock inversion) — e.g. the reaper closing an idle
+            // session from the sessionmgr queue while main ran a queue.sync into it. The
+            // local strong `wv` keeps destroy() safe after close() returns; the closingFlag
+            // (set above, before the hop) still guards concurrent executes. On-main callers
+            // keep the synchronous path (destroy must not outlive the run-loop tick there).
             if Thread.isMainThread {
                 wv.destroy()
             } else {
-                DispatchQueue.main.sync { wv.destroy() }
+                DispatchQueue.main.async { [wv] in wv.destroy() }
             }
         }
         scheduler.reset()
@@ -473,11 +480,16 @@ public final class FBSessionManager {
     // create has re-pinned yet) so CDP still finds SOME live session.
     public func firstSession() -> FBSession? {
         return queue.sync {
+            // M-9 (1016 audit): a mid-close session (isClosing=true, state still not
+            // terminal) was handed to CDP ensureSession — events/derefs then raced the
+            // teardown. Skip closing sessions in BOTH lookups.
             if let pid = firstSessionId, let s = sessions[pid],
-               s.state != .closed && s.state != .permanentFail {
+               s.state != .closed && s.state != .permanentFail && !s.isClosing {
                 return s
             }
-            return sessions.values.first(where: { $0.state != .closed && $0.state != .permanentFail })
+            return sessions.values.first(where: {
+                $0.state != .closed && $0.state != .permanentFail && !$0.isClosing
+            })
         }
     }
 }

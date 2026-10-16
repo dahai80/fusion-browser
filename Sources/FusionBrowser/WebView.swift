@@ -12,7 +12,22 @@ import AppKit
 public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     public let mode: WebMode
     public let sessionId: String
-    private(set) var webView: WKWebView?
+    // C-3 (1016 audit): webView is written on main (setup/destroy) and read from the
+    // action driver's global-queue context (evaluateJSSync/screenshotSync/currentUrl).
+    // A plain var is a data race (UB) — a torn read can hand the driver a deallocating
+    // WKWebView. NSLock-guarded storage + accessor; jsWedged rides the same lock (also
+    // written on the driver queue, read in the completion on main).
+    private var _webView: WKWebView?
+    private let wvLock = NSLock()
+    private var webView: WKWebView? {
+        get { wvLock.lock(); defer { wvLock.unlock() }; return _webView }
+        set { wvLock.lock(); _webView = newValue; wvLock.unlock() }
+    }
+    private var _jsWedged: Bool = false
+    private var jsWedged: Bool {
+        get { wvLock.lock(); defer { wvLock.unlock() }; return _jsWedged }
+        set { wvLock.lock(); _jsWedged = newValue; wvLock.unlock() }
+    }
     private var hostWindow: NSWindow?
     private let log = FBLogger.shared
     // L-7: JS eval pipeline wedge flag. WKWebView serializes JS eval on the main thread;
@@ -21,7 +36,7 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     // surfaced loudly, and a self-heal reload is attempted. There is no public API to cancel
     // a running evaluateJavaScript, so the only recovery is to reload the page (which drops
     // the wedged script context) — best-effort, never blocks the caller.
-    private var jsWedged: Bool = false
+    // (jsWedged storage lives with the C-3 lock block above.)
     // R-1: pending navigation completion slot. Off-main navigate arms this; the
     // WKNavigationDelegate didFinish/didFail signals it, identity-matched to the
     // WKNavigation returned by load(). Lets navigate wait for the page to actually
@@ -189,15 +204,23 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         return committed
     }
 
-    // F-12: clear in-memory cookies for this session. logout must revoke the RUNTIME
+    // F-12/S-5: clear in-memory cookies for the session. Logout must revoke the RUNTIME
     // cookie store, not just the persistent Keychain layer — otherwise the live webview
     // stays authenticated after Keychain delete. Synchronous (semaphore) so the caller
-    // can order it BEFORE webview destroy on main. NEVER call on the main thread (the
-    // completion dispatches to main; sync-wait on main deadlocks) — call off-main.
+    // can order it BEFORE webview destroy off-main. NEVER sync-wait on main (the
+    // completion dispatches to main). The old main-branch just logged + SKIPPED —
+    // silently left the store uncleared (F-12's purpose defeated whenever close ran
+    // on main). Now it runs the same getAllCookies/delete chain WITHOUT the wait
+    // (completions dispatch to main — safe there) and logs the count honestly.
     public func clearCookies() {
         guard let store = webView?.configuration.websiteDataStore.httpCookieStore else { return }
         if Thread.isMainThread {
-            log.warn("WebView", "clearCookies called on main; skipping sync wait (would deadlock) sess=\(sessionId)")
+            // S-5: async chain, no wait (completions dispatch to main — safe here).
+            store.getAllCookies { [weak self] cookies in
+                let count = cookies.count
+                for c in cookies { store.delete(c) }
+                FBLogger.shared.info("WebView", "clearCookies main-branch async cleared=\(count) sess=\(self?.sessionId ?? "?")")
+            }
             return
         }
         let sem = DispatchSemaphore(value: 0)
@@ -262,9 +285,14 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
             self.navLock.unlock()
             sem.signal()
         }
+        // C-5 (1016 audit): stopLoading is AppKit/WebKit state mutation — main only. The
+        // old off-main `webView?.stopLoading()` (called from the driver's global queue)
+        // is the same class of off-main WKWebView call that traps (exit 133), same as
+        // off-main load(). Main-hop ASYNC (never sync-wait: caller holds no main-needed
+        // lock, but async avoids any main<->driver serialization surprises).
         if sem.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
             log.warn("WebView", "navigate main-hop timeout \(url) sess=\(sessionId)")
-            webView?.stopLoading()
+            mainStopLoading()
             clearPendingNav()
             return
         }
@@ -275,9 +303,22 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         clearPendingNav()
         if waited == .timedOut {
             log.warn("WebView", "navigate didFinish timeout \(url) sess=\(sessionId)")
-            webView?.stopLoading()
+            mainStopLoading()
         } else {
             log.info("WebView", "navigate \(url) sess=\(sessionId) (didFinish)")
+        }
+    }
+
+    // C-5 (1016 audit): WKWebView.stopLoading must run on main (same trap class as
+    // off-main load()). Fire-and-forget main hop; captured weakly.
+    private func mainStopLoading() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // C-3 accessor — read under wvLock on main.
+            if let wv = self.webView {
+                wv.stopLoading()
+                log.debug("WebView", "stopLoading (main-hop) sess=\(self.sessionId)")
+            }
         }
     }
 

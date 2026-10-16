@@ -164,6 +164,12 @@ class FusionBrowserClient:
         data = json.dumps(obj).encode()
         sock.sendall(_HEADER.pack(len(data)) + data)
 
+    # P-1 (1016 audit): hard cap on a single frame body. The engine never sends a frame
+    # this large (AXTree markdown of a pathological page is ~1MB; screenshots ~2MB); a
+    # bigger decoded length means a desynced/garbage stream — fail loud and fast instead
+    # of blocking until the socket timeout trying to read e.g. 3GB.
+    _MAX_FRAME = 64 * 1024 * 1024
+
     @staticmethod
     def _recv_one(sock: socket.socket) -> Optional[dict]:
         hdr = b""
@@ -173,6 +179,9 @@ class FusionBrowserClient:
                 return None
             hdr += chunk
         (length,) = _HEADER.unpack(hdr)
+        if length > FusionBrowserClient._MAX_FRAME:
+            raise FBError("connection_closed",
+                          "frame length %d exceeds cap (desynced stream)" % length)
         body = b""
         while len(body) < length:
             chunk = sock.recv(length - len(body))
@@ -191,7 +200,14 @@ class FusionBrowserClient:
         s.settimeout(self.timeout)
         s.connect(self.socket_path)
         self._sock = s
-        self._auth()
+        try:
+            self._auth()
+        # P-1: an auth-handshake transport fault also leaves the connection unusable —
+        # close so the next op auto-reconnects instead of reading a desynced stream.
+        except (socket.timeout, OSError) as e:
+            self.close()
+            raise FBError("connection_closed",
+                          "transport fault: %s" % type(e).__name__) from e
 
     def _auth(self) -> None:
         if self._authed or self._sock is None:
@@ -200,16 +216,34 @@ class FusionBrowserClient:
         ack = self._recv_one(self._sock)
         if not ack or ack.get("type") != "auth_ack":
             self.close()
-            payload = (ack or {}).get("payload", {})
-            raise FBError.from_payload(payload) if payload else FBError("auth_denied", "no auth_ack")
+            payload = (ack or {}).get("payload", {}) if ack else {}
+            # P-2 (1016 audit): the old code assumed any non-ack frame was a server error
+            # frame and passed its payload to from_payload — a non-error frame type
+            # produced a fabricated "unknown" code that hid what actually happened. Only
+            # a real error frame maps through from_payload; anything else is honestly
+            # "unexpected frame type".
+            if ack is not None and ack.get("type") == "error":
+                raise FBError.from_payload(payload)
+            raise FBError("auth_denied",
+                          "unexpected frame type: %s" % (ack or {}).get("type", "none"))
         self._authed = True
         log.debug("auth_ack received")
 
     def _request(self, frame: dict) -> dict:
         self._connect()
         assert self._sock is not None
-        self._send(self._sock, frame)
-        resp = self._recv_one(self._sock)
+        try:
+            self._send(self._sock, frame)
+            resp = self._recv_one(self._sock)
+        # P-1 (1016 audit): a socket timeout or OSError mid-request leaves the connection
+        # in an unknown/desynced state. The old code let the raw exception propagate with
+        # the connection kept, so the NEXT call on this client read garbage (the previous
+        # response's tail parsed as the next header). Kill the connection on any transport
+        # fault; the next op auto-reconnects.
+        except (socket.timeout, OSError) as e:
+            self.close()
+            raise FBError("connection_closed",
+                          "transport fault: %s" % type(e).__name__) from e
         if resp is None:
             self.close()
             raise FBError("connection_closed", "server closed mid-frame")
@@ -241,7 +275,8 @@ class FusionBrowserClient:
         sid = cr.get("session_id")
         if not sid:
             raise FBError("internal_error", "create_session returned no session_id")
-        log.info("create_session id=%s credentialInjected=%s", sid, cr.get("credentialInjected"))
+        log.info("create_session id=%s credential_injected=%s", sid,
+                 cr.get("credential_injected", cr.get("credentialInjected")))
         return sid
 
     def execute(self, session_id: str, action: str, target_node_id: Optional[str] = None,

@@ -18,9 +18,29 @@ public final class FBCredentialManager {
         return "\(domain)|\(name)|\(path)"
     }
 
+    // S-3 (1016 audit): domain is a client-controlled string spliced into the composite
+    // account key. A domain containing the `|` separator (or empty / control chars)
+    // collides across sessions — `a|b` + cookie `x` keys `a|b|x` which the prefix filter
+    // of domain `a` matches, letting a caller read/delete another domain's credentials.
+    // Normalize + reject: allow RFC 1035 hostname chars only (letters, digits, dot, hyphen).
+    func isValidDomain(_ domain: String) -> Bool {
+        guard !domain.isEmpty, domain.count <= 253 else { return false }
+        for ch in domain.unicodeScalars {
+            let ok = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+                || (ch >= "0" && ch <= "9") || ch == "." || ch == "-"
+            if !ok { return false }
+        }
+        return true
+    }
+
     // FR-05: store full cookie attributes as JSON blob. Keyed per-cookie (F-10) so
     // multiple cookies per domain coexist without clobbering.
     public func store(domain: String, cookieAttrs: [String: String]) -> FBError? {
+        // S-3: reject a domain that cannot be a valid hostname before it reaches the key.
+        guard isValidDomain(domain) else {
+            log.warn("Cred", "store rejected: invalid domain shape (fail-closed)")
+            return .invalidRequest
+        }
         guard let blob = try? JSONSerialization.data(withJSONObject: cookieAttrs) else {
             return .invalidRequest
         }
@@ -52,8 +72,13 @@ public final class FBCredentialManager {
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(add as CFDictionary, nil)
         if status != errSecSuccess {
+            // S-1 (1016 audit): a SecItemAdd failure is a STORE failure (disk full,
+            // permission, ...), not an injection failure — the old code returned the
+            // injection-failure code, so upper stats/decisions counted a real Keychain
+            // failure in the success path, violating the file-header principle of
+            // honestly distinguishing "engine bug" from "keychain unavailable".
             log.error("Cred", "store failed for domain=\(domain) name=<masked> path=\(path) status=\(status)")
-            return .credentialInjected
+            return .credentialStoreFailed
         }
         FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "store", result: "ok")
         return nil
@@ -131,6 +156,14 @@ public final class FBCredentialManager {
     // D11: logout mode deletes ALL Keychain items for a domain (every cookie). Also
     // covers the legacy bare-domain key for items written before F-10.
     public func delete(domain: String) {
+        // S-3: same domain-shape gate as store — an invalid domain cannot match any
+        // stored key (store rejects it), so fail fast instead of scanning the keychain.
+        guard isValidDomain(domain) else {
+            log.warn("Cred", "logout rejected: invalid domain shape (fail-closed)")
+            FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "logout",
+                                                result: "invalid_domain")
+            return
+        }
         var deletedAny = false
         // Per-cookie items: enumerate accounts (attributes only; data+all is errSecParam
         // here), delete those keyed to this domain.
@@ -172,13 +205,53 @@ public final class FBCredentialManager {
             log.warn("Cred", "logout_cookie skip: missing name domain=\(domain)")
             return false
         }
+        // S-3: same domain-shape gate as store (delete is also keyed by domain).
+        guard isValidDomain(domain) else {
+            log.warn("Cred", "logout_cookie rejected: invalid domain shape (fail-closed)")
+            FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "logout_cookie",
+                                                result: "invalid_domain")
+            return false
+        }
         let acct = accountKey(domain: domain, name: name, path: path)
         let del: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: acct
         ]
-        let ok = SecItemDelete(del as CFDictionary) == errSecSuccess
+        var ok = SecItemDelete(del as CFDictionary) == errSecSuccess
+        // S-2 (1016 audit): exact-key miss when path differs — the caller (E-14 logout)
+        // passes the cookie attrs as seen in the webview store, but store() may have
+        // keyed a different path (default "/"). A bare "not found" leaves the credential
+        // live while logout reports fail. Fall back to prefix enumeration `domain|name|`
+        // (any path) so logout actually deletes what was stored.
+        if !ok {
+            let prefix = "\(domain)|\(name)|"
+            let scan: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitAll
+            ]
+            var items: CFTypeRef?
+            if SecItemCopyMatching(scan as CFDictionary, &items) == errSecSuccess,
+               let arr = items as? [[String: Any]] {
+                var fallbackDeleted = false
+                for entry in arr {
+                    guard let acct2 = entry[kSecAttrAccount as String] as? String,
+                          acct2.hasPrefix(prefix) else { continue }
+                    let d: [String: Any] = [
+                        kSecClass as String: kSecClassGenericPassword,
+                        kSecAttrService as String: service,
+                        kSecAttrAccount as String: acct2
+                    ]
+                    if SecItemDelete(d as CFDictionary) == errSecSuccess {
+                        fallbackDeleted = true
+                        log.info("Cred", "logout_cookie fallback path-hit domain=\(domain)")
+                    }
+                }
+                ok = fallbackDeleted
+            }
+        }
         FBCredentialAuditLog.shared.record(caller: "engine", domain: domain, op: "logout_cookie",
                                             result: ok ? "ok" : "fail")
         log.info("Cred", "logout_cookie domain=\(domain) deleted=\(ok)")

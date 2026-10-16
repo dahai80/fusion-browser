@@ -27,20 +27,30 @@ func loadConfig() -> FBEngineConfig {
         let home = NSHomeDirectory()
         path = "\(home)/.fusion-browser/config.json"
     }
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
-        log.info("Main", "no config file, using defaults")
-        return FBEngineConfig.default
+    // M-8 (1016 audit): the old `try?` conflated "file absent" (fine — defaults) with
+    // "file present but unreadable/IO-error" (NOT fine — an operator who wrote a config
+    // and hit a permission error got SILENT defaults, e.g. auth disabled). Distinguish:
+    // missing -> defaults; present-but-unreadable -> fail loud, exit(1).
+    if FileManager.default.fileExists(atPath: path) {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)), !data.isEmpty else {
+            let msg = "config file exists at \(path) but could not be read (permissions/IO); refusing to silently fall back to defaults."
+            log.error("Main", msg)
+            FileHandle.standardError.write(Data((msg + "\n").utf8))
+            exit(1)
+        }
+        do {
+            let cfg = try JSONDecoder().decode(FBEngineConfig.self, from: data)
+            log.info("Main", "config loaded from \(path)")
+            return cfg
+        } catch {
+            let msg = "config parse failed at \(path): \(error). Fix the JSON or remove the file to use defaults; refusing to start with silent default fallback."
+            log.error("Main", msg)
+            FileHandle.standardError.write(Data((msg + "\n").utf8))
+            exit(1)
+        }
     }
-    do {
-        let cfg = try JSONDecoder().decode(FBEngineConfig.self, from: data)
-        log.info("Main", "config loaded from \(path)")
-        return cfg
-    } catch {
-        let msg = "config parse failed at \(path): \(error). Fix the JSON or remove the file to use defaults; refusing to start with silent default fallback."
-        log.error("Main", msg)
-        FileHandle.standardError.write(Data((msg + "\n").utf8))
-        exit(1)
-    }
+    log.info("Main", "no config file, using defaults")
+    return FBEngineConfig.default
 }
 
 // P5/crash-fix: process activity token held for app lifetime. The engine is a headless

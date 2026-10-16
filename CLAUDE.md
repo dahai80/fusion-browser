@@ -101,17 +101,27 @@ is now no longer required (kept on the gate lines for compatibility). The Python
 `scripts/` are verify harnesses (smoke_client / perf_bench / uma_coexist /
 longrun_leak / verify_nonpersistent), not part of the build.
 
+Python client (v0.2.1, `client/python/fusion_browser_client/`): pure-socket UDS
+client for Python siblings. Its tests are separate from the Swift suite:
+
+```bash
+cd /Users/dahai/fusion/fusion-browser/client/python
+pip install -e ".[test]"
+pytest tests/ -v   # fake UDS server, no live engine needed
+```
+
 B-6/R-6 CI: `.github/workflows/release-gate.yml` gates PRs to main. Two jobs —
-`build-and-test` (GitHub-hosted `macos-14` arm64: `swift build -c release` +
-`swift test --disable-sandbox`, the 213 deterministic tests, no GUI needed) and
+`build-and-test` (GitHub-hosted `macos-15` arm64: `swift build -c release` +
+`swift test --disable-sandbox`, the 230 deterministic tests, no GUI needed) and
 `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]` runner with a
-GUI session: full `scripts/release_gate.sh` — 9 live harnesses incl
-`ownership_smoke.py`, needs a CoreGraphics display + main run loop for WKWebView).
-`live-path-gate` needs fusion-mlx on `:11434` for `uma_coexist`; set repo var
-`SKIP_UMA=1` to drop only that harness (8 of 9 still run). Both jobs are required
-status checks (branch protection) — a failure blocks merge. The live path is NOT
-covered by `swift test` (ARCH-3), so the self-hosted GUI job is the only CI
-regression gate for real WKWebView behavior.
+GUI session: full `scripts/release_gate.sh` — 10 live hard harnesses incl
+`ownership_smoke.py` + `perf_multipage.py`, needs a CoreGraphics display + main
+run loop for WKWebView). `live-path-gate` needs fusion-mlx on `:11434` for
+`uma_coexist`; set repo var `SKIP_UMA=1` to drop only that harness (9 of 10 still
+run — the SKIP_UMA inline list includes `perf_multipage.py` and fails hard on a
+missing harness). Both jobs are required status checks (branch protection) — a
+failure blocks merge. The live path is NOT covered by `swift test` (ARCH-3), so
+the self-hosted GUI job is the only CI regression gate for real WKWebView behavior.
 
 **WKWebView cannot run under `swift test`** — no main run loop means
 `evaluateJSSync`/`screenshotSync` semaphores deadlock (completion handlers dispatch

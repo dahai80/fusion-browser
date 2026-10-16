@@ -30,12 +30,6 @@ public final class FBCDPServer {
     private let clientsLock = NSLock()
     // P-4: cap concurrent CDP connections so a connection flood can't exhaust memory.
     fileprivate let maxConnections = 8
-    // H-5: the caps granted to the authenticated WS connection. Set on WS upgrade from
-    // verifyBearer's return; executeAction threads them to the driver. Guarded by capsLock
-    // (set on the WS handshake queue, read on the dispatch queue). Empty until first upgrade
-    // -> executeAction fails closed (no caps -> every action denied) until a client auths.
-    fileprivate private(set) var authedCaps: FBCapabilities = []
-    private let capsLock = NSLock()
     // CDP target id (one synthetic page target; maps to a session).
     public let targetId = "fb-target-0001"
 
@@ -87,6 +81,10 @@ public final class FBCDPServer {
         guard clientFd >= 0 else { return }
         // P-4: enforce per-server connection cap. Reject excess fds before allocating a
         // connection + read buffer; protects against connection-flood memory exhaustion.
+        // M-12 (1016 audit): the old check-then-insert used two separate lock windows —
+        // a burst of concurrent acceptOnce callbacks could ALL pass the check (each sees
+        // count=7 < 8) and insert extra connections past the cap. Check + insert in ONE
+        // atomic window; set the fd non-blocking inside the window too.
         clientsLock.lock()
         if clients.count >= maxConnections {
             clientsLock.unlock()
@@ -94,12 +92,10 @@ public final class FBCDPServer {
             log.warn("CDP", "connection rejected fd=\(clientFd): maxConnections=\(maxConnections) reached")
             return
         }
-        clientsLock.unlock()
         let flags = fcntl(clientFd, F_GETFL, 0)
         _ = fcntl(clientFd, F_SETFL, flags | O_NONBLOCK)
         log.info("CDP", "connection accepted fd=\(clientFd)")
         let conn = FBCDPConnection(fd: clientFd, server: self)
-        clientsLock.lock()
         clients[ObjectIdentifier(conn)] = conn
         clientsLock.unlock()
         conn.start()
@@ -142,26 +138,30 @@ public final class FBCDPServer {
         return nil
     }
 
-    // H-5: store the caps granted at WS upgrade so executeAction can enforce them per CDP
-    // method. Called once per connection on a successful handshake.
-    fileprivate func setAuthedCaps(_ caps: FBCapabilities) {
-        capsLock.lock(); authedCaps = caps; capsLock.unlock()
-        log.info("CDP", "authed caps set raw=\(caps.rawValue)")
-    }
-    fileprivate func currentCaps() -> FBCapabilities {
-        capsLock.lock(); let c = authedCaps; capsLock.unlock(); return c
+    // A-8 (1016 audit): exact-session lookup for the event push paths — ensureSession
+    // returns firstSession, which under several live sessions may be a session the CDP
+    // caller is NOT driving (events would describe the wrong page).
+    fileprivate func sessionById(_ id: String) -> FBSession? {
+        return manager.get(id)
     }
 
-    fileprivate func executeAction(_ req: BrowserActionRequest) -> BrowserStateResponse {
+    // H-5: executeAction takes the CALLER's caps as an explicit parameter. The old
+    // server-level authedCaps/currentCaps pair was SHARED across all CDP connections —
+    // client B's WS upgrade overwrote client A's caps, so a scoped token could be
+    // silently elevated by another connection's all-caps token (C-1, 1016 audit: the
+    // caps state was per-connection data stored in per-server state). Caps now travel
+    // with the connection (FBCDPConnection.authedCaps, set at its own WS upgrade) and
+    // are threaded explicitly through every executeAction call.
+    fileprivate func executeAction(_ req: BrowserActionRequest, caps: FBCapabilities) -> BrowserStateResponse {
         guard let s = ensureSession() else {
             return BrowserStateResponse(sessionId: "", url: "", title: "", axTreeMarkdown: "",
                                         interactiveNodes: [], error: .sessionNotFound, traceId: req.traceId)
         }
         var r = req
         r.sessionId = s.id
-        // H-5: pass the connection's actual caps to the driver (authoritative per-action gate).
-        // Empty caps (no client authed yet, or a scoped token) -> the driver denies the action.
-        return driver.execute(session: s, req: r, caps: currentCaps())
+        // H-5: pass the caller's caps to the driver (authoritative per-action gate).
+        // Empty caps -> the driver denies the action.
+        return driver.execute(session: s, req: r, caps: caps)
     }
 
     fileprivate func extractAXTree() -> (result: FBExtractResult?, markdown: String, audit: SecurityAuditResult, error: FBError?) {
@@ -194,6 +194,10 @@ final class FBCDPConnection {
     // and event-frame synthesis so it is unit-testable without a live socket or WKWebView
     // (live webview cannot run under `swift test` — evaluateJSSync deadlocks).
     private var emitter: FBCDPEventEmitter!
+    // H-5/C-1 (1016 audit): caps granted at THIS connection's WS upgrade, threaded to
+    // executeAction per call. Server-level state was cross-connection (client B's
+    // upgrade overwrote client A's caps).
+    fileprivate var authedCaps: FBCapabilities = []
     // E-8: ONE persistent translator per connection. The translator owns the DOM
     // identity registry (intToIdStr / objectIdToIdStr / idStrToSelector); a fresh
     // translator per message would wipe the registry between getFullAXTree and the
@@ -263,7 +267,8 @@ final class FBCDPConnection {
         let path = parts[1]
         // Optional Bearer token on /json (cowork sends Authorization header). Discovery
         // executes no actions, so caps need not be stored here (stored on WS upgrade).
-        if checkBearerAuth(headerStr) == nil {
+        let httpCaps = checkBearerAuth(headerStr)
+        if httpCaps == nil {
             writeHTTP(status: "401 Unauthorized", body: ""); close(); return
         }
 
@@ -282,19 +287,44 @@ final class FBCDPConnection {
             let url = path.contains("?") ? String(path.split(separator: "?", maxSplits: 1).dropFirst().joined()) : ""
             // E-15: same navigate-origin gate as Page.navigate (R-16). An empty allowlist is
             // fail-closed for http(s) origins; local schemes (about:/data:) are allowed.
-            if !url.isEmpty, let navOrigin = originOfConnUrl(url), !navOrigin.isEmpty {
-                guard server?.isOriginAllowed(navOrigin) ?? false else {
-                    log.warn("CDP", "PUT /json/new navigate denied origin=\(navOrigin) fd=\(fd)")
+            // S-4 (1016 audit): the old `!navOrigin.isEmpty` half let an UNPARSEABLE url
+            // (originOfConnUrl returns "") pass the gate — a garbage URL is not a local
+            // scheme, so it must fail closed like any other non-allowlisted origin. Local
+            // schemes (nil) still navigate freely.
+            if !url.isEmpty {
+                let navOrigin = originOfConnUrl(url)
+                // nil = local scheme (navigate freely); "" = unparseable (deny); else check.
+                if navOrigin == "" || (navOrigin != nil && !(server?.isOriginAllowed(navOrigin!) ?? false)) {
+                    log.warn("CDP", "PUT /json/new navigate denied origin=\(navOrigin == "" ? "<unparseable>" : (navOrigin ?? "")) fd=\(fd)")
                     writeHTTP(status: "403 Forbidden", body: "navigate_denied"); close(); return
                 }
             }
             if let s = server?.ensureSession(), !url.isEmpty {
-                _ = server?.executeAction(BrowserActionRequest(sessionId: s.id, action: .navigate, payloadText: url, traceId: "cdp-new"))
+                // C-1: thread the HTTP request's own caps (captured above) — per-connection
+                // authedCaps is not set for plain-HTTP requests.
+                _ = server?.executeAction(BrowserActionRequest(sessionId: s.id, action: .navigate, payloadText: url, traceId: "cdp-new"),
+                                          caps: httpCaps ?? [])
             }
             writeHTTP(status: "200 OK", body: singleTargetJSON(), contentType: "application/json")
         } else if method == "GET" && path.hasPrefix("/json/close/") {
-            // GET /json/close/<id> — cowork only checks status 200; do not tear down the shim target.
-            writeHTTP(status: "200 OK", body: "{\"id\":\"\(server?.targetId ?? "")\"}", contentType: "application/json")
+            // GET /json/close/<id> — M-14 (1016 audit): the old handler ALWAYS returned a
+            // 200 without closing anything ("cowork only checks status 200"), so a client
+            // that closed a page via the CDP discovery API left the backing session live
+            // (holding quota + memory) while believing it was gone. Honest semantics now:
+            // a known target id closes the shim's backing session (system caller — CDP is
+            // single-tenant nil-owner, mirroring ensureSession); an unknown id is a 404
+            // like real Chrome.
+            let tid = path.split(separator: "/", maxSplits: 3).last.map(String.init) ?? ""
+            if tid == server?.targetId {
+                if let s = server?.ensureSession() {
+                    _ = server?.managerClose(sessionId: s.id)
+                    log.info("CDP", "/json/close closed backing session sess=\(s.id)")
+                }
+                writeHTTP(status: "200 OK", body: "{\"id\":\"\(tid)\"}", contentType: "application/json")
+            } else {
+                log.warn("CDP", "/json/close unknown target id=\(tid.prefix(24)) fd=\(fd)")
+                writeHTTP(status: "404 Not Found", body: "{\"error\":\"unknown target\"}", contentType: "application/json")
+            }
         } else {
             writeHTTP(status: "404 Not Found", body: "")
         }
@@ -368,8 +398,8 @@ final class FBCDPConnection {
         guard let caps = checkBearerAuth(header) else {
             writeHTTP(status: "403 Forbidden", body: "bearer required"); close(); return
         }
-        server?.setAuthedCaps(caps)
-        // E-15/F-3: reject cross-origin WebSocket upgrades, fail-closed on empty Origin.
+        self.authedCaps = caps
+        log.info("CDP", "connection caps set raw=\(caps.rawValue) fd=\(fd)")        // E-15/F-3: reject cross-origin WebSocket upgrades, fail-closed on empty Origin.
         // Browsers permit `new WebSocket()` across origins; without an Origin check any
         // visited webpage can drive the engine. The old code let an EMPTY Origin bypass
         // the check (commented "non-browser client like cowork is allowed"), which gave a
@@ -395,8 +425,10 @@ final class FBCDPConnection {
         upgraded = true
         authed = true
         // E-8: mint the ONE translator for this connection now that upgrade succeeded.
-        // It carries the DOM identity registry; reused for every subsequent frame.
-        self.translator = FBCDPTranslator(server: server, allowedOrigins: server?.allowedOrigins ?? [])
+        // It carries the DOM identity registry + THIS connection's caps; reused for every
+        // subsequent frame.
+        self.translator = FBCDPTranslator(server: server, allowedOrigins: server?.allowedOrigins ?? [],
+                                          caps: caps)
         log.info("CDP", "WS upgraded path=\(path) fd=\(fd)")
         // Any leftover bytes in recvBuf become the first WS frame(s).
         if !recvBuf.isEmpty { handleWSFrames() }
@@ -479,7 +511,8 @@ final class FBCDPConnection {
         // (executeAction -> wv.navigate blocks to didFinish, so the response is already captured).
         if method == "Page.navigate" {
             let url = (params["url"] as? String) ?? ""
-            let respCapture = server?.ensureSession().flatMap { $0.webview?.lastResponse }
+            // A-8: prefer the session the translator's actions actually landed on.
+            let respCapture = activeSession().flatMap { $0.webview?.lastResponse }
             emitter.pushNavigateEvents(url: url, response: respCapture)
             drainConsoleEvents()
         }
@@ -488,12 +521,21 @@ final class FBCDPConnection {
         if method == "Runtime.evaluate" { drainConsoleEvents() }
     }
 
+    // A-8 (1016 audit): the session this connection is driving — the translator's last
+    // action target, falling back to ensureSession (fresh connection, no action yet).
+    // ensureSession alone could resolve a DIFFERENT, UDS-created session and push events
+    // describing the wrong page.
+    private func activeSession() -> FBSession? {
+        if let sid = translator?.lastSessionId, let s = server?.sessionById(sid) { return s }
+        return server?.ensureSession()
+    }
+
     // E-11/Finding 9: drain window.__fbConsole (populated by the WebView.swift console shim)
     // and emit Runtime.consoleAPICalled for each buffered entry. The shim had no reader, so
     // consoleAPICalled never fired. Drained after navigate (scripts ran) + after evaluate.
     private func drainConsoleEvents() {
         guard emitter.runtimeEnabled else { return }
-        guard let s = server?.ensureSession(), !s.isClosing, let wv = s.webview else { return }
+        guard let s = activeSession(), !s.isClosing, let wv = s.webview else { return }
         let raw = wv.evaluateJSSync("JSON.stringify(window.__fbConsole||[])") as? String
         _ = wv.evaluateJSSync("window.__fbConsole=[]")
         emitter.pushConsoleEvents(fromConsoleJSON: raw)
@@ -544,13 +586,30 @@ final class FBCDPConnection {
 
     private func writeAll(_ data: Data) {
         var sent = 0
+        // M-15 (1016 audit): the old EAGAIN path busy-spun (usleep(1000); continue) with
+        // NO deadline — a stalled/slow client (TCP window full) spun the shared global
+        // queue thread forever while still holding the connection. poll(POLLOUT) with a
+        // deadline: block the thread efficiently until writable or give up and drop the
+        // client. Mirrors the UDSServer send pattern.
+        let deadline = Date().addingTimeInterval(10)
         while sent < data.count {
             let n = data.withUnsafeBytes { raw -> Int in
                 let p = raw.bindMemory(to: UInt8.self).baseAddress!.advanced(by: sent)
                 return Darwin.write(fd, p, data.count - sent)
             }
             if n < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK { usleep(1000); continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    guard Date() < deadline else {
+                        log.warn("CDP", "writeAll deadline fd=\(fd), dropping client")
+                        readSource?.cancel()
+                        return
+                    }
+                    var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    _ = withUnsafeMutablePointer(to: &pfd) { ptr in
+                        poll(ptr, 1, 500)
+                    }
+                    continue
+                }
                 readSource?.cancel(); return
             }
             if n == 0 { readSource?.cancel(); return }
@@ -826,10 +885,31 @@ final class FBCDPTranslator {
     private var objSeq = 0
     private var qSeq = 0
     private let registryLock = NSLock()
+    // H-5/C-1 (1016 audit): the caps granted at this connection's WS upgrade, threaded
+    // through every executeAction. Per-connection (was per-server — cross-connection
+    // elevation). A scoped token stays scoped no matter who else connects.
+    private let caps: FBCapabilities
+    // A-8 (1016 audit): the id of the session this connection's actions actually landed
+    // on, recorded by runAction from each executeAction response. Event push paths use
+    // it (not ensureSession — which can resolve a DIFFERENT, UDS-created session when
+    // the engine holds several) so events describe the page the caller is driving.
+    private(set) var lastSessionId: String?
 
-    init(server: FBCDPServer?, allowedOrigins: [String]) {
+    init(server: FBCDPServer?, allowedOrigins: [String], caps: FBCapabilities = []) {
         self.server = server
         self.allowedOrigins = allowedOrigins
+        self.caps = caps
+    }
+
+    // A-8: single funnel for translator actions — records the resolved session id.
+    private func runAction(_ req: BrowserActionRequest) -> BrowserStateResponse {
+        guard let server = server else {
+            return BrowserStateResponse(sessionId: "", url: "", title: "", axTreeMarkdown: "",
+                                        interactiveNodes: [], error: .sessionNotFound, traceId: req.traceId)
+        }
+        let st = server.executeAction(req, caps: caps)
+        if !st.sessionId.isEmpty { lastSessionId = st.sessionId }
+        return st
     }
 
     // Dispatch a CDP method. Returns JSON response string (envelope {id,result|error}).
@@ -852,14 +932,16 @@ final class FBCDPTranslator {
             // short-circuited on `!srv.allowedOrigins.isEmpty`, letting default-config
             // operators drive the webview to any attacker origin. Per audit §6 item 13:
             // 空 allowedOrigins 时 navigate 必须 fail-closed（与 EVALUATE 一致）.
-            if let navOrigin = originOfUrl(url), !navOrigin.isEmpty {
-                guard server?.isOriginAllowed(navOrigin) ?? false else {
-                    log.warn("CDP", "navigate denied origin=\(navOrigin)")
-                    return errorResp(id: id, code: -32000, message: "navigate_denied")
-                }
+            // S-4 (1016 audit): "" (unparseable URL) previously passed the gate via
+            // `!navOrigin.isEmpty` — a garbage URL is not a local scheme, deny it. nil
+            // (local scheme) still navigates freely.
+            let navOrigin = originOfUrl(url)
+            if navOrigin == "" || (navOrigin != nil && !(server?.isOriginAllowed(navOrigin!) ?? false)) {
+                log.warn("CDP", "navigate denied origin=\(navOrigin == "" ? "<unparseable>" : (navOrigin ?? ""))")
+                return errorResp(id: id, code: -32000, message: "navigate_denied")
             }
-            _ = server?.executeAction(BrowserActionRequest(sessionId: "", action: .navigate,
-                                                           payloadText: url, traceId: "cdp-nav"))
+            _ = runAction(BrowserActionRequest(sessionId: "", action: .navigate,
+                                               payloadText: url, traceId: "cdp-nav"))
             return ok(id, result: ["frameId": "fb-frame", "loaderId": "fb-loader"])
         case "Page.captureScreenshot":
             return handleScreenshot(id: id)
@@ -970,8 +1052,8 @@ final class FBCDPTranslator {
         let js = "(function(sel){var el=document.querySelector(sel);if(!el){return {ok:false};}"
             + "try{window.__fbMap.set(" + jsStr(qId) + ",new WeakRef(el));}catch(e){return {ok:false};}"
             + "return {ok:true,id:" + jsStr(qId) + "};})(" + selLit + ");"
-        let state = server.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                              payloadText: js, traceId: "cdp-qsa"))
+        let state = runAction(BrowserActionRequest(sessionId: "", action: .evaluate,
+                                                   payloadText: js, traceId: "cdp-qsa"))
         if let err = state.error {
             log.warn("CDP", "querySelector evaluate denied err=\(err.code) sel=\(selector.prefix(40))")
             return errorResp(id: id, code: -32000, message: err.code)
@@ -1001,8 +1083,8 @@ final class FBCDPTranslator {
         guard let boxJS = buildBoxModelJS(idStr: idStr) else {
             return errorResp(id: id, code: -32000, message: "node not found")
         }
-        let state = server.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                              payloadText: boxJS, traceId: "cdp-box"))
+        let state = runAction(BrowserActionRequest(sessionId: "", action: .evaluate,
+                                                   payloadText: boxJS, traceId: "cdp-box"))
         if let err = state.error {
             log.warn("CDP", "getBoxModel evaluate denied err=\(err.code) idStr=\(idStr)")
             return errorResp(id: id, code: -32000, message: err.code)
@@ -1057,8 +1139,8 @@ final class FBCDPTranslator {
         guard let focusJS = buildFocusJS(idStr: idStr) else {
             return errorResp(id: id, code: -32000, message: "node not found")
         }
-        let state = server.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                              payloadText: focusJS, traceId: "cdp-focus"))
+        let state = runAction(BrowserActionRequest(sessionId: "", action: .evaluate,
+                                                   payloadText: focusJS, traceId: "cdp-focus"))
         if let err = state.error {
             log.warn("CDP", "focus evaluate denied err=\(err.code) idStr=\(idStr)")
             return errorResp(id: id, code: -32000, message: err.code)
@@ -1170,7 +1252,8 @@ final class FBCDPTranslator {
         }
         // FR-10: non-whitelist EVALUATE rejected at ActionDriver (origin check).
         let state = server?.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                               payloadText: expr, traceId: "cdp-eval"))
+                                                               payloadText: expr, traceId: "cdp-eval"),
+                                          caps: caps)
         if let err = state?.error {
             log.warn("CDP", "evaluate denied err=\(err.code)")
             return errorResp(id: id, code: -32000, message: err.code)
@@ -1285,7 +1368,8 @@ final class FBCDPTranslator {
             return ok(id, result: [:])
         }
         _ = server?.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                       payloadText: clickJS, traceId: "cdp-click"))
+                                                       payloadText: clickJS, traceId: "cdp-click"),
+                                  caps: caps)
         return ok(id, result: [:])
     }
 
@@ -1303,19 +1387,38 @@ final class FBCDPTranslator {
         let key = (params["key"] as? String) ?? ""
         if key == "Enter" {
             let enterJS = "(function(){var e=document.activeElement;if(e){var ev=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true});e.dispatchEvent(ev);if(e.form){e.form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));}}})();"
-            _ = server?.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                           payloadText: enterJS, traceId: "cdp-enter"))
+            _ = runAction(BrowserActionRequest(sessionId: "", action: .evaluate,
+                                               payloadText: enterJS, traceId: "cdp-enter"))
         }
         return ok(id, result: [:])
     }
 
     // Input.insertText -> type into focused element.
+    // A-6 (1016 audit): the old JS did a bare `ae.value = ...` + old Event('input') —
+    // silently DROPPED by React/Vue/Angular controlled inputs (framework overrode the
+    // value setter; a bare Event carries no inputType/data, so the framework's onChange
+    // never sees real keystroke semantics). Mirror resolveType's R-10 native-prototype
+    // setter + InputEvent pattern, appended to the existing value.
     private func handleInsertText(params: [String: Any], id: Int) -> String {
         let text = (params["text"] as? String) ?? ""
         if !text.isEmpty {
-            let typeJS = "(function(){var ae=document.activeElement;if(ae){ae.value=(ae.value||'')+\(jsStr(text));ae.dispatchEvent(new Event('input',{bubbles:true}));return 'ok';}return 'miss';})();"
-            _ = server?.executeAction(BrowserActionRequest(sessionId: "", action: .evaluate,
-                                                           payloadText: typeJS, traceId: "cdp-insert"))
+            let typeJS = """
+(function(){var ae=document.activeElement;if(!ae){return 'miss';}
+var append=__ARG__;
+var nativeSetter=null;
+try{var proto=(ae.tagName==='TEXTAREA')?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
+var desc=Object.getOwnPropertyDescriptor(proto,'value');
+if(desc&&typeof desc.set==='function')nativeSetter=desc.set;}catch(e){nativeSetter=null;}
+if(nativeSetter){var cur=ae.value||'';
+nativeSetter.call(ae,cur+append);
+try{ae.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:append}));}catch(e){ae.dispatchEvent(new Event('input',{bubbles:true}));}
+ae.dispatchEvent(new Event('change',{bubbles:true}));
+}else{ae.value=(ae.value||'')+append;
+ae.dispatchEvent(new Event('input',{bubbles:true}));ae.dispatchEvent(new Event('change',{bubbles:true}));}
+return 'ok';})();
+"""
+            _ = runAction(BrowserActionRequest(sessionId: "", action: .evaluate,
+                                               payloadText: typeJS.replacingOccurrences(of: "__ARG__", with: jsStr(text)), traceId: "cdp-insert"))
         }
         return ok(id, result: [:])
     }
@@ -1357,7 +1460,12 @@ final class FBCDPTranslator {
         if nodeId.hasPrefix("e"), let n = Int(nodeId.dropFirst()) {
             return n
         }
-        return stableHash(nodeId) & 0x7FFFFFFF
+        // M-13 (1016 audit): the raw `& 0x7FFFFFFF` fallback landed anywhere in 1..2^31 —
+        // colliding with the eN small-int space (e.g. FNV("q5") == 531 == e531's slot),
+        // which silently remaps one registry id to ANOTHER node's idStr. Keep the hash
+        // OUT of the eN range: bit 24 set + low 23 bits of the hash. The two spaces
+        // (eN < 2^23, hashed >= 2^24) cannot collide for any realistic node count.
+        return 0x1000000 | (stableHash(nodeId) & 0x7FFFFF)
     }
 
     // FNV-1a (32-bit) — deterministic across processes, unlike Swift's hashValue.
