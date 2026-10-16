@@ -221,10 +221,17 @@ def main():
         report["md_body_token_p95"] = percentile(body_tokens, 95)
         report["extract_p95_ms"] = percentile(latencies, 95)
         # PRD §1.1 gates: P50 compression >= 0.90 AND P95 node-body token <= 1500.
+        # T-2 (1016 audit): a floor on SCORED pages. The old gates let 9 of 10 pages
+        # exclude themselves (load failures) and still "PASS" on the single survivor's
+        # metrics — a 10% corpus masquerading as the SLA. Require >= 8 scored of 10.
+        MIN_SCORED = 8
+        scored_fail = report["scored_pages"] < MIN_SCORED
         comp_fail = report["compression_p50"] < SLA_COMPRESSION
         tok_fail = report["md_body_token_p95"] > SLA_TOKEN
-        if comp_fail or tok_fail:
+        if scored_fail or comp_fail or tok_fail:
             reasons = []
+            if scored_fail:
+                reasons.append("scored pages {0} < floor {1} (corpus under test, not a SLA sample)".format(report["scored_pages"], MIN_SCORED))
             if comp_fail:
                 reasons.append("P50 compression {0} < {1}".format(report["compression_p50"], SLA_COMPRESSION))
             if tok_fail:

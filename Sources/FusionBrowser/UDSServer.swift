@@ -11,6 +11,12 @@ public final class FBUDSServer {
     private let auth: FBAuth
     private let rateLimitConfig: FBRateLimitConfig
     private var listenFd: Int32 = -1
+    // C-4 (1016 audit): listenFd is written by stop() (cancel handler on the source queue)
+    // and read by acceptOnce() (same source queue — but the cancel handler + a concurrent
+    // acceptOnce can interleave). NSLock-guarded so a closed fd can never be re-accept()ed
+    // (accept on closed fd = EMFILE/-1 or, worse, accept on a REUSED fd number = hijacking
+    // an unrelated client socket).
+    private let fdLock = NSLock()
     private var acceptSource: DispatchSourceRead?
     private let log = FBLogger.shared
     // Retain clients so they aren't deallocated before their read source fires.
@@ -39,6 +45,14 @@ public final class FBUDSServer {
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = socketPath.utf8CString
         let pathCap = MemoryLayout.size(ofValue: addr.sun_path)
+        // M-4 (1016 audit): the old memcpy silently TRUNCATED a socket path longer than
+        // sun_path (104 bytes) — a long path bound a DIFFERENT socket file than requested
+        // (e.g. two truncated paths colliding on one socket). Fail loud instead.
+        guard pathBytes.count <= pathCap else {
+            Darwin.close(fd)
+            log.error("UDSServer", "socketPath exceeds sun_path cap (\(pathBytes.count) > \(pathCap)): \(socketPath)")
+            throw FBError.internalError
+        }
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             ptr.withMemoryRebound(to: CChar.self, capacity: pathCap) { dst in
                 _ = pathBytes.withUnsafeBufferPointer { src in
@@ -71,7 +85,14 @@ public final class FBUDSServer {
     }
 
     private func acceptOnce() {
-        let clientFd = Darwin.accept(listenFd, nil, nil)
+        // C-4: read the listen fd under the lock; accept runs outside the lock (accept can
+        // block? no — fd is non-blocking + level-triggered source, safe outside). The lock
+        // only serializes against stop()'s cancel+close.
+        fdLock.lock()
+        let fd = listenFd
+        fdLock.unlock()
+        guard fd >= 0 else { return }
+        let clientFd = Darwin.accept(fd, nil, nil)
         guard clientFd >= 0 else { return }
         // Set non-blocking so DispatchSourceRead read never blocks the queue.
         let flags = fcntl(clientFd, F_GETFL, 0)
@@ -95,15 +116,41 @@ public final class FBUDSServer {
     }
 
     public func stop() {
+        // M-7 (1016 audit): stop() cancelled the accept source but left live client
+        // connections (their DispatchSourceRead sources kept firing on a server that is
+        // shutting down, serving requests against a closing engine). Tear down clients
+        // first, then the accept source.
+        var live: [FBClientConnection] = []
+        clientsLock.lock()
+        live = Array(clients.values)
+        clients.removeAll()
+        clientsLock.unlock()
+        for c in live { c.teardown() }
         acceptSource?.cancel()
         acceptSource = nil
         try? FileManager.default.removeItem(atPath: socketPath)
-        log.info("UDSServer", "stopped")
+        log.info("UDSServer", "stopped clients=\(live.count)")
     }
 }
 
 final class FBClientConnection {
-    private let fd: Int32
+    // C-4 (1016 audit): fd is closed by the cancel handler and used by onReadable — a
+    // plain let raced a concurrent close (close(fd) could land between a queued read's
+    // fd fetch and the read syscall; a REUSED fd number then gets read/written by this
+    // stale connection). NSLock-guarded: the cancel handler closes + invalidates under
+    // the lock; every use re-reads a valid fd.
+    private var fd: Int32
+    private let fdLock = NSLock()
+    // Fetch the fd if still valid (-1 after close).
+    private func validFd() -> Int32 {
+        fdLock.lock(); defer { fdLock.unlock() }
+        return fd
+    }
+    private func closeFd() {
+        fdLock.lock()
+        if fd >= 0 { Darwin.close(fd); fd = -1 }
+        fdLock.unlock()
+    }
     private let manager: FBSessionManager
     private let driver: FBActionDriver
     private let auth: FBAuth
@@ -113,6 +160,8 @@ final class FBClientConnection {
     // main-thread webview path). The serial label still isolates one client's frames.
     private let queue = DispatchQueue(label: "fusion-browser.client", qos: .userInitiated)
     private var readSource: DispatchSourceRead?
+    // C-6: partial-frame watchdog timer (see start()).
+    private var partialTimer: DispatchSourceTimer?
     private var authed = false
     private var caps: FBCapabilities = []
     private let log = FBLogger.shared
@@ -166,19 +215,54 @@ final class FBClientConnection {
         source.setEventHandler { [weak self] in
             self?.onReadable()
         }
+        // C-6 (1016 audit): append-time staleness check only fired on the client's NEXT
+        // bytes — a silent slow-drip client held the partial buffer forever. A watchdog
+        // timer on this client's serial queue polls the reader's partial-frame state every
+        // frameTimeoutMs/2; a partial frame past the deadline drops the connection even
+        // with no further appends. Cancelled with the read source (same queue — no race).
+        let partialTimer = DispatchSource.makeTimerSource(queue: queue)
+        partialTimer.schedule(deadline: .now() + .milliseconds(reader.frameTimeoutMs / 2),
+                              repeating: .milliseconds(reader.frameTimeoutMs / 2))
+        partialTimer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            if self.reader.checkPartialTimeout() {
+                self.log.warn("Client", "partial-frame timeout (timer) fd=\(self.fd)")
+                self.send(error: .invalidRequest)
+                self.readSource?.cancel()
+            }
+        }
+        partialTimer.resume()
+        self.partialTimer = partialTimer
         source.setCancelHandler { [weak self] in
-            if let f = self?.fd, f >= 0 { Darwin.close(f) }
-            self?.log.info("Client", "disconnected fd=\(self?.fd ?? -1)")
-            if let s = self { s.onDone(s) }
+            guard let self = self else { return }
+            // C-4: close + invalidate under the lock so a queued onReadable can never
+            // operate a closed (or reused) fd.
+            self.closeFd()
+            // C-6: stop the partial-frame watchdog with the connection.
+            self.partialTimer?.cancel()
+            self.partialTimer = nil
+            self.log.info("Client", "disconnected fd=\(self.fd)")
+            self.onDone(self)
         }
         source.resume()
         self.readSource = source
     }
 
+    // M-7: synchronous teardown used by FBUDSServer.stop() — cancels the read source
+    // (cancel handler closes the fd + releases from the server's client set) + the
+    // partial-frame watchdog timer.
+    func teardown() {
+        readSource?.cancel()
+        partialTimer?.cancel()
+        partialTimer = nil
+    }
+
     private func onReadable() {
         var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        let curFd = validFd()
+        guard curFd >= 0 else { readSource?.cancel(); return }
         let n = buf.withUnsafeMutableBufferPointer { ptr -> Int in
-            return Darwin.read(fd, ptr.baseAddress, ptr.count)
+            return Darwin.read(curFd, ptr.baseAddress, ptr.count)
         }
         if n == 0 {
             log.debug("Client", "EOF fd=\(fd)")
@@ -270,6 +354,15 @@ final class FBClientConnection {
         let effectiveOwner: String? = isSystemCaller ? nil : ownerId
         switch req {
         case .createSession(let r):
+            // M-6 (1016 audit): createSession was rate-limit EXEMPT — a flood of creates
+            // (each spawning a WKWebView + WebContent process) bypassed the limiter, the
+            // fastest route to exhausting FR-08's session quota. Rate-gate it like .execute;
+            // a rejected create consumes no token (same bucket-refill retry semantics).
+            if let limiter = rateLimiter, !limiter.admit() {
+                log.warn("Client", "rate_limited fd=\(fd) op=create_session")
+                send(error: .rateLimited)
+                return
+            }
             switch manager.create(req: r, traceId: req.traceId, ownerId: effectiveOwner) {
             case .success(let cr): send(resp: .createSession(cr))
             case .failure(let e): send(error: e)
@@ -344,7 +437,16 @@ final class FBClientConnection {
 
     private func sendAuthed() {
         let ack = AuthAck(caps: caps.rawValue)
-        if let data = try? FBFrame.encode(ack) { writeAll(data) }
+        // M-5 (1016 audit): the old `try?` swallowed an encode failure — the client then
+        // hung waiting for an auth_ack that never comes until its socket timeout. Fail
+        // loud; the read source is cancelled so the client sees an EOF instead.
+        do {
+            let data = try FBFrame.encode(ack)
+            writeAll(data)
+        } catch {
+            log.error("Client", "auth_ack encode failed: \(error)")
+            readSource?.cancel()
+        }
     }
 
     // P-2: bounded backpressure. fd is non-blocking; on EAGAIN we poll(POLLOUT) with a
@@ -354,6 +456,11 @@ final class FBClientConnection {
     private static let writeDeadlineMs: Int32 = 5000
     private func writeAll(_ data: Data) {
         var sent = 0
+        // C-4: fetch a valid fd per call — a concurrent close must not leave this loop
+        // writing to a closed/reused fd.
+        let outFd = validFd()
+        guard outFd >= 0 else { return }
+        let fd = outFd
         while sent < data.count {
             let n = data.withUnsafeBytes { raw -> Int in
                 let p = raw.bindMemory(to: UInt8.self).baseAddress!.advanced(by: sent)
@@ -379,7 +486,10 @@ final class FBClientConnection {
     // Block up to writeDeadlineMs for the fd to become writable. Returns false on
     // timeout (caller should drop the client) or poll error.
     private func awaitWritable() -> Bool {
-        var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        // C-4: same fd-validity discipline as writeAll.
+        let curFd = validFd()
+        guard curFd >= 0 else { return false }
+        var pfd = pollfd(fd: curFd, events: Int16(POLLOUT), revents: 0)
         let r = withUnsafeMutablePointer(to: &pfd) { ptr in
             Darwin.poll(ptr, nfds_t(1), Self.writeDeadlineMs)
         }

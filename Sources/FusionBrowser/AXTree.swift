@@ -63,14 +63,18 @@ public enum FBAXTreeReducer {
                           isDisabled: n.isDisabled, currentValue: n.currentValue, bbox: n.bbox)
     }
 
-    // Compact Markdown: one line per node. Header + nodes only (no style noise).
+    // Compact Markdown: one line per node lines joined by \n. Header + nodes only (no style noise).
     // T2.1 acceptance: Token P95 <= 1500, compression P50 >= 90%.
+    // A-5 (1016 audit): name/url/title/currentValue are page-controlled strings embedded into
+    // the markdown — a page title containing a newline injects fake node lines into the tree
+    // the LLM reads (prompt-injection surface: an attacker page fabricates node entries).
+    // mdSafe strips control chars + newlines before embedding.
     public static func toMarkdown(_ res: FBExtractResult) -> String {
-        var lines: [String] = ["# Page", "url: \(res.url)", "title: \(res.title)", "", "# 交互节点"]
+        var lines: [String] = ["# Page", "url: \(mdSafe(res.url))", "title: \(mdSafe(res.title))", "", "# 交互节点"]
         for n in res.nodes {
-            var line = "- [@\(n.nodeId)] \(n.role)"
-            if !n.name.isEmpty { line += " “\(n.name)”" }
-            if !n.currentValue.isEmpty { line += " (val:\(n.currentValue))" }
+            var line = "- [@\(n.nodeId)] \(mdSafe(n.role))"
+            if !n.name.isEmpty { line += " “\(mdSafe(n.name))”" }
+            if !n.currentValue.isEmpty { line += " (val:\(mdSafe(n.currentValue)))" }
             if n.isDisabled { line += " [disabled]" }
             if n.renderHidden || !n.hiddenFlags.isEmpty {
                 let hits = n.hiddenFlags.keys.sorted() + (n.renderHidden ? ["render:hidden"] : [])
@@ -79,6 +83,14 @@ public enum FBAXTreeReducer {
             lines.append(line)
         }
         return lines.joined(separator: "\n")
+    }
+
+    // A-5: flatten control characters (incl. \n / \r / \t) to spaces so a page-controlled
+    // string cannot inject new lines into the markdown tree. Truncated to 200 chars.
+    public static func mdSafe(_ s: String) -> String {
+        let allowed = s.unicodeScalars.filter { !($0.value < 0x20 || $0.value == 0x7F) }
+        let joined = String(String.UnicodeScalarView(allowed))
+        return String(joined.prefix(200))
     }
 }
 

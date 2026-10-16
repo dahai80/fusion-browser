@@ -217,10 +217,15 @@ final class CDPNavigateOriginL11Tests: XCTestCase {
     // for ANY url — under strict E-15 a nil server DENIES an http(s) origin; the unparseable
     // case is the only one that still skips.)
     func testNavigateGateSkipsWhenNoServer() {
+        // S-4 (1016 audit): unparseable url is now DENIED fail-closed even with a nil
+        // server (origin "" is not a local scheme) — the old "no server -> gate skipped"
+        // lax path is gone; garbage URLs can never reach executeAction.
         let src = FBCDPTranslator(server: nil, allowedOrigins: []).dispatch(method: "Page.navigate",
                                                                             params: ["url": "x"], id: 9)
         let r = src.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
-        XCTAssertNil(r["error"], "unparseable url -> gate skipped -> no navigate_denied (E-15)")
+        let err = r["error"] as? [String: Any]
+        XCTAssertEqual(err?["message"] as? String, "navigate_denied",
+                       "unparseable url -> S-4 fail-closed navigate_denied")
     }
 
     // E-15/R-16: with NO allowlist configured (empty), navigate to a remote http(s) origin

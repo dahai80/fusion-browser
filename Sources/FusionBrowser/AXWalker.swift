@@ -186,12 +186,17 @@ public enum FBWalkerScript {
         var rect=el.getBoundingClientRect();
         if(rect.width===0||rect.height===0) return true;
         if(rect.right<0||rect.bottom<0||rect.left>window.innerWidth||rect.top>window.innerHeight) return true;
-        // elementFromPoint hit-test at center.
+        // elementFromPoint hit-test at center. A-7 (1016 audit): an overlay with
+        // pointer-events:none is visually on top but CANNOT be clicked — it does not
+        // make the underlying element effectively invisible, so treat it as NOT covering
+        // (the old code purged interactive elements under any hit-test blocker, hiding
+        // clickable nodes from the LLM).
         var cx=rect.left+rect.width/2, cy=rect.top+rect.height/2;
         var hit=document.elementFromPoint(cx,cy);
         if(hit && hit!==el && !el.contains(hit)) {
-            // covered by higher z-index element -> hidden
-            return true;
+            var ps="";
+            try{ ps=getComputedStyle(hit).pointerEvents; }catch(e){ ps=""; }
+            if(ps!=="none") return true;
         }
         return false;
     }

@@ -53,7 +53,7 @@ flows over the CDP WS surface — Flow A click (`getFullAXTree` → `resolveNode
 `focus` + `getBoxModel` → real rect centroid → `dispatchMouseEvent` → onclick
 fired) + Flow B fill (`getDocument` → `querySelector('#u')` → `focus` →
 `insertText('hello')` → `Runtime.evaluate` value == `'hello'`). R-7 gate
-green end-to-end (183 unit tests + live harnesses incl. cdp_dom_smoke).
+green end-to-end (230 unit tests + live harnesses incl. cdp_dom_smoke).
 
 **Enterprise-commercial gap wave landed (2026-08-29)** — closes the four items the
 0828 product audit's enterprise tier flagged beyond the 6 blockers:
@@ -192,10 +192,12 @@ R-10 gateway proxy ownership-bypass enable example (`~/.fusion-browser/config.js
 | `scripts/uma_coexist.py` | P4-4 UMA coexistence (10 sessions×100 actions + mlx inference concurrent) | `scripts/uma-report.json` |
 | `scripts/longrun_leak.py` | P4-5 1000-action long-run no-leak (RSS quartile comparison) | `scripts/longrun-report.json` |
 | `scripts/navigate_execute_smoke.py` | navigate-via-execute SIGTRAP fix (execute navigate off-main → engine stays alive, page loads) | terminal PASS/FAIL |
+| `scripts/verify_gateway_r10.py` | R-10 system-caller bypass + E-40 blank-page screenshot (multi-node proxied screenshot PNG) | `scripts/gateway-r10-report.json` |
+| `scripts/perf_multipage.py` | R-7 10-page AXTree compression SLA (tiktoken metric; ≥8 scored pages required) | `scripts/perf-multipage-report.json` |
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 
-`scripts/release_gate.sh` wires build + the 198 deterministic tests + 9 live harnesses into one PASS/FAIL gate. B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-14` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it). Both jobs are required status checks — failure blocks merge.
+`scripts/release_gate.sh` wires build + the 230 deterministic tests + 10 live hard harnesses into one PASS/FAIL gate (a missing hard harness fails the gate — not a skip). B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-15` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it — the remaining 9 harnesses still run). Both jobs are required status checks — failure blocks merge.
 
 Visual-grounding enable example (incremental `~/.fusion-browser/config.json`):
 ```json

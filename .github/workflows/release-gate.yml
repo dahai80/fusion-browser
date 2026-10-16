@@ -10,12 +10,12 @@ on:
 # R-6 / B-6: CI regression gate for the live WKWebView path.
 #
 # ARCH-3: WKWebView completion handlers dispatch to main; under `swift test` there is
-# no main run loop, so evaluateJSSync/screenshotSync semaphores deadlock. The 198 unit
+# no main run loop, so evaluateJSSync/screenshotSync semaphores deadlock. The 230 unit
 # tests are deterministic (no live webview). The live automation surface is verified
 # ONLY by the built release binary + the Python harnesses in scripts/ (release_gate.sh).
 #
 # Two jobs:
-#   build-and-test  — GitHub-hosted macOS-15 arm64. swift build + swift test (198).
+#   build-and-test  — GitHub-hosted macOS-15 arm64. swift build + swift test (230).
 #                     Fast, reliable, no special runner. Proves the package compiles
 #                     and deterministic tests pass on a clean machine. NOTE: macOS-14
 #                     image ships Swift 5.10 only — the package needs Swift 6.0
@@ -48,7 +48,7 @@ jobs:
       - name: Build (release)
         run: swift build -c release --disable-sandbox
 
-      - name: Unit tests (198, deterministic — no live WKWebView)
+      - name: Unit tests (230, deterministic — no live WKWebView)
         run: swift test --disable-sandbox
 
   live-path-gate:
@@ -92,10 +92,10 @@ jobs:
             http://localhost:11434/v1/models >/dev/null 2>&1 \
             || { echo "::warning::fusion-mlx not reachable on :11434 (or key rejected); set SKIP_UMA=1 or start it"; exit 1; }
 
-      - name: Run release gate (build + 9 live harnesses)
-        # The deterministic 198-test suite is gated by the build-and-test job
+      - name: Run release gate (build + 10 live harnesses)
+        # The deterministic 230-test suite is gated by the build-and-test job
         # (GitHub-hosted macos-15, unlocked Keychain). This self-hosted job runs
-        # build + the 9 live WKWebView harnesses ONLY. swift test is skipped here
+        # build + the 10 live WKWebView harnesses ONLY. swift test is skipped here
         # (--skip-tests): the self-hosted runner's xctest subprocess has a
         # non-interactive Keychain (errSecInteractionNotAllowed on the credential
         # tests), and the suite is already covered by build-and-test.
@@ -103,14 +103,21 @@ jobs:
           chmod +x scripts/release_gate.sh
           if [[ "$SKIP_UMA" == "1" ]]; then
             # No fusion-mlx -> drop the one MLX-dependent harness (uma_coexist).
-            # release_gate.sh's HARD list includes uma, so run build + the 8
-            # non-MLX harnesses inline instead of the full gate.
+            # release_gate.sh's HARD list includes uma, so run build + the 9
+            # non-MLX harnesses inline instead of the full gate. G-1 (1016 audit):
+            # perf_multipage was missing from this list — the SKIP_UMA path ran a
+            # weaker gate than the full one; a missing harness now fails hard too.
             swift build -c release --disable-sandbox
             for h in scripts/verify_nonpersistent.py scripts/navigate_execute_smoke.py \
                      scripts/evaluate_smoke.py scripts/cdp_dom_smoke.py \
                      scripts/cdp_event_smoke.py scripts/metrics_smoke.py \
-                     scripts/longrun_leak.py scripts/ownership_smoke.py; do
-              [[ -f "$h" ]] && { echo "::group::live: $h"; python3 "$h" || exit 1; echo "::endgroup::"; }
+                     scripts/longrun_leak.py scripts/ownership_smoke.py \
+                     scripts/perf_multipage.py; do
+              if [[ -f "$h" ]]; then
+                echo "::group::live: $h"; python3 "$h" || exit 1; echo "::endgroup::"
+              else
+                echo "::error::hard harness MISSING: $h"; exit 1
+              fi
             done
           else
             scripts/release_gate.sh --skip-tests

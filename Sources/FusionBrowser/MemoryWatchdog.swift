@@ -19,11 +19,17 @@ import Foundation
 public struct FBMemoryWatchdogConfig: Codable, Equatable {
     public var enabled: Bool
     public var sampleIntervalMs: Int
+    // M-3 (1016 audit): default 200MB was below the IDLE footprint of a single live
+    // WKWebView — host shell (~80-120MB) + one WebContent renderer (~150-300MB) sits
+    // well over 200MB before any session opens a real page, so a watchdog enabled at
+    // the old default drained every session immediately on first sample (self-heal
+    // that IS the outage). Default now 1024MB — clears the idle footprint with
+    // margin; operators tune per node.
     public var thresholdMB: Int
     public var action: String
 
     public init(enabled: Bool = false, sampleIntervalMs: Int = 30_000,
-                thresholdMB: Int = 200, action: String = "close_sessions") {
+                thresholdMB: Int = 1024, action: String = "close_sessions") {
         self.enabled = enabled
         self.sampleIntervalMs = sampleIntervalMs
         self.thresholdMB = thresholdMB
@@ -51,10 +57,23 @@ public final class FBMemoryWatchdog {
         self.config = config
         self.onBreach = onBreach
         self.sampler = sampler
+        // M-1 (1016 audit): tag the watchdog queue with a DispatchSpecificKey so stop()
+        // can detect an on-queue self-call. onBreach (drain-all) runs on this queue via
+        // the timer handler; if a drain closure ever calls watchdog.stop(), the old
+        // queue.sync {} barrier self-deadlocked the watchdog queue forever.
+        queue.setSpecific(key: FBMemoryWatchdog.queueKey, value: true)
     }
+
+    // M-1: queue identity for the self-deadlock guard in stop().
+    private static let queueKey = DispatchSpecificKey<Bool>()
 
     public func start() {
         guard config.enabled else { return }
+        // M-2 (1016 audit): double-start guard. A second start() without stop() leaked the
+        // first timer (still firing ticks against the same watchdog — doubled sampling and
+        // doubled onBreach spam). Cancel+drop any existing timer before creating a new one.
+        timer?.cancel()
+        timer = nil
         let t = DispatchSource.makeTimerSource(queue: queue)
         let interval = DispatchTimeInterval.milliseconds(config.sampleIntervalMs)
         t.schedule(deadline: .now() + interval, repeating: interval)
@@ -65,6 +84,15 @@ public final class FBMemoryWatchdog {
     }
 
     public func stop() {
+        // M-1 (1016 audit): if stop() is invoked ON the watchdog queue (e.g. from a drain
+        // closure reached via onBreach), queue.sync {} self-deadlocks. On-queue, the timer
+        // cancel is already serialized with any in-flight tick on this same queue, so the
+        // drain barrier is unnecessary — skip it and just drop the timer.
+        if DispatchQueue.getSpecific(key: FBMemoryWatchdog.queueKey) != nil {
+            timer?.cancel()
+            timer = nil
+            return
+        }
         timer?.cancel()
         timer = nil
         // M-11: a tick() already dispatched to `queue` can still run after cancel(), firing

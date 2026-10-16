@@ -25,9 +25,17 @@ public final class FBRateLimiter {
     private let log = FBLogger.shared
 
     public init(ratePerSec: Double, burst: Int) {
-        self.capacity = Double(burst)
-        self.ratePerSec = ratePerSec
-        self.tokens = Double(burst)
+        // M-11 (1016 audit): ratePerSec<=0 or burst<=0 makes the limiter a BLACK HOLE —
+        // every admit() rejects (tokens can never reach 1), so the engine denies ALL
+        // traffic and the operator's only symptom is "nothing works". A zero/negative
+        // config is a config bug; fail loud. (Silently treating <=0 as unlimited would
+        // hide the bug in the opposite direction.) Clamp to a workable floor + log error.
+        if ratePerSec <= 0 || burst <= 0 {
+            FBLogger.shared.error("RateLimiter", "invalid config ratePerSec=\(ratePerSec) burst=\(burst) — clamping to rate=1/s burst=1 (was: all traffic denied)")
+        }
+        self.capacity = Double(max(1, burst))
+        self.ratePerSec = max(1, ratePerSec)
+        self.tokens = Double(max(1, burst))
         self.lastRefillNs = DispatchTime.now().uptimeNanoseconds
     }
 

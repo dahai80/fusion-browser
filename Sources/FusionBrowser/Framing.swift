@@ -12,7 +12,10 @@ public final class FBFrameReader {
     private let buffer = DispatchQueue(label: "fusion-browser.framereader", attributes: .concurrent)
     private var data = Data()
     private let maxFrameBytes: Int
-    private let frameTimeoutMs: Int
+    public let frameTimeoutMs: Int
+    // C-6 (1016 audit): a lock for the cross-queue check method below (append runs on the
+    // client's serial queue; the connection's partial-frame watchdog timer runs elsewhere).
+    private let stateLock = NSLock()
     // Wall-clock instant a partial frame (length prefix read, body incomplete) first
     // appeared. Reset to nil whenever the buffer drains to a frame boundary.
     private var partialStartedAt: Date?
@@ -29,6 +32,10 @@ public final class FBFrameReader {
     // - timeout: a partial frame stayed incomplete past frameTimeoutMs -> caller closes conn,
     //   buffer cleared. Defends against the slow-drip partial-frame hold (B-4).
     public func append(_ chunk: Data) -> (frames: [Data], overflow: Bool, timeout: Bool) {
+        // C-6: state (data/partialStartedAt) is now also touched by checkPartialTimeout
+        // from the connection's watchdog timer — guard with stateLock.
+        stateLock.lock()
+        defer { stateLock.unlock() }
         var frames: [Data] = []
         var overflow = false
         var timeout = false
@@ -71,7 +78,28 @@ public final class FBFrameReader {
     }
 
     public func reset() {
+        stateLock.lock()
         data.removeAll()
         partialStartedAt = nil
+        stateLock.unlock()
+    }
+
+    // C-6 (1016 audit): the append-time staleness check only ran when the client sent the
+    // NEXT bytes — a client that dripped 1 byte then went SILENT (no further appends) held
+    // the partial buffer + its slot forever; the timeout never fired because nothing
+    // re-entered append. Returns true when the pending partial frame has overstayed
+    // frameTimeoutMs (clearing the buffer); the connection's watchdog timer calls this
+    // between appends.
+    public func checkPartialTimeout() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let started = partialStartedAt else { return false }
+        if Int(Date().timeIntervalSince(started) * 1000) > frameTimeoutMs {
+            log.warn("Framing", "partial frame incomplete after \(frameTimeoutMs)ms (timer check); timeout drop")
+            data.removeAll()
+            partialStartedAt = nil
+            return true
+        }
+        return false
     }
 }

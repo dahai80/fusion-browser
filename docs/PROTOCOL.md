@@ -148,10 +148,12 @@ Mechanism (`AXWalker.swift`): `var id="e"+(nextId++); window.__fbMap.set(id, new
 | screenshot | 1<<4 | 16 |
 | evaluate | 1<<5 | 32 |
 | close | 1<<6 | 64 |
+| metrics (R-3/B-3) | 1<<7 | 128 |
 
-- `default` caps = 95 (all except `evaluate`) — agent-studio tool token.
-- `all` caps = 127 — full capability token.
+- `default` caps = 95 (all except `evaluate` and `metrics`) — agent-studio tool token.
+- `all` caps = 255 — full capability token.
 - `evaluate` is off by default; granting it requires the token's capability set AND origin whitelist (§7 of contract).
+- `metrics` (R-3/B-3) is off by default; without it the UDS `{type:"metrics"}` request and CDP `Performance.getMetrics` are cap-gated off (`.authDenied` / `evaluate_denied` at the method gate). Elevate via `tokenCapabilities: ["metrics"]` or `["all"]`. CDP `Performance.getMetrics` is Bearer-gated at the WS upgrade, not per-method.
 
 ## 6. Error Codes
 
@@ -161,9 +163,14 @@ Mechanism (`AXWalker.swift`): `var id="e"+(nextId++); window.__fbMap.set(id, new
 |------|-----------|---------|
 | `node_stale` | true | target node id no longer maps in `__fbMap` (post-navigate rebuild, id drift, or stale id from warmup). Retry after re-extract. |
 | `credential_locked` | true | screen locked → Keychain inaccessible. Retry after unlock. |
+| `credential_store_failed` | true | Keychain `SecItemAdd` failed (disk full, permission) — credential NOT persisted. Distinct from `credential_injection_failed` (webview inject step) and `credential_locked`. |
 | `quota_exceeded` | false | FR-08 RAM-tier session quota full. Reject `create`. |
 | `evaluate_denied` | false | `evaluate` action not in token caps OR origin not whitelisted. |
+| `auth_denied` | false | token invalid/missing, or method not in token caps (metrics read path). |
 | `session_not_found` | false | `session_id` unknown / already closed. |
+| `session_closing` | false | session mid-close (E-22). Concurrent execute fails fast; create a new session. |
+| `not_owner` | false | B-5/E-34: session owned by another UDS connection. System callers (nil owner) bypass. |
+| `rate_limited` | true | H-8 per-client token bucket empty. Back off and retry. |
 | `timeout` | true | tiered watchdog (NFR-R) exceeded. Crash-rebuild attempted for idempotent actions. |
 | `replay_limit` | false | FR-13 rebuild-depth-cap exceeded (`guards.rebuildDepthCap`, default 1). |
 | `internal_error` | false | unexpected failure; check `Observability` logs with `trace_id`. |
@@ -193,9 +200,51 @@ T3.3 extended domains (events via `FBCDPEventEmitter`, pushed with NO `id` per s
 - `Runtime` — `consoleAPICalled`
 - `Page` — `frameNavigated`, `lifecycleEvent`
 
-CDP layer does NOT token-gate; security = EVALUATE origin whitelist + UDS token on the
-main path. Default off (`cdpEnabled`); enable in config only when cowork needs it.
+CDP Bearer gating (H-5, corrected — the old "CDP does NOT token-gate" note was stale):
+HTTP discovery endpoints (`/json*`) AND the WS upgrade require
+`Authorization: Bearer <token>` fail-closed — no token configured denies all. Caps are
+captured at the gate and enforced per translated action: `Runtime.evaluate` and the
+internal evaluate path pass the connection's granted caps into `executeAction`
+(cap-gated off unless `tokenCapabilities` grants `evaluate`); `Page.navigate` and
+`PUT /json/new?<url>` are origin-gated (E-15 fail-closed: an empty `allowedOrigins`
+denies remote origins and an unparseable URL; `data:`/`about:` navigate freely).
+Default off (`cdpEnabled`); enable in config only when cowork needs it.
 
 HTTP discovery: `/json`, `/json/version`, `/json/new?<url>`, `/json/close/<id>`.
 WS endpoint: `ws://127.0.0.1:<port>/devtools/page/<targetId>` (RFC 6455; SHA1
-Sec-WebSocket-Accept via `Insecure.SHA1`).
+Sec-WebSocket-Accept via `Insecure.SHA1`). `/json/close/<id>` closes the backing
+session for a known targetId (200) and returns 404 for an unknown id — real-close
+semantics, not the old always-200 stub (M-14).
+
+## 8. Metrics / Capacity Requests + System-Caller Token
+
+### 8.1 metrics (R-3/B-3)
+
+```json
+{"type": "metrics"}
+```
+Response `{type:"metrics_ack", ...}` — real counters + latency quantiles (p50/p95).
+Cap-gated: requires the `metrics` capability (§5). Without it the request answers
+`auth_denied`. CDP `Performance.getMetrics` mirrors the same counters, Bearer-gated
+at the WS upgrade.
+
+### 8.2 capacity (H-9)
+
+```json
+{"type": "capacity"}
+```
+Response reports per-node `FBNodeCapacity` identity + utilization
+(`max_sessions`/`live_sessions`/`free_memory_mb`/`ram_gb`). Routed behind the
+`.metrics` capability cap — same elevation as §8.1. No in-process scheduler:
+cross-node scheduling/migration is fusion-gateway-side (see `docs/multinode-contract.md`).
+
+### 8.3 system-caller token (R-10)
+
+Operator config `tokenSystemCaller: true` designates the node `authToken` as a
+system-caller token. A UDS connection authenticated with it passes `ownerId: nil`
+to create/execute/close → SessionManager bypasses E-34 ownership checks. Needed
+for per-call-dial proxies (fusion-gateway dials a fresh UDS connection per op, so
+create's ownerId ≠ execute's ownerId without the bypass). Fail-closed default
+false; operator config ONLY (never client-supplied); orthogonal to caps (a system
+caller still needs `tokenCapabilities: ["all"]` to drive sessions); trusted-proxy
+tokens only. See CLAUDE.md "R-10 system-caller bypass" for the full invariant.

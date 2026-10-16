@@ -119,7 +119,12 @@ public final class FBActionDriver {
             // F-15: if the watchdog already timed out and cancelled us, do NOT touch the
             // session/webview — the caller has moved on (possibly closing/rebuilding).
             if token.isCancelled { return nil }
-            return self?.dispatch(session: session, webview: wv, req: req, sid: sid, traceId: traceId)
+            // A-2 (1016 audit): thread the cancel token INTO dispatch so the block also
+            // bails between webview ops (navigate/eval/extract), not only at entry. The
+            // old block checked the token once; a timeout that fired mid-dispatch left the
+            // block running extract on a session the caller had already given up on.
+            return self?.dispatch(session: session, webview: wv, req: req, sid: sid,
+                                  traceId: traceId, cancel: token)
         }
 
         switch result {
@@ -193,8 +198,21 @@ public final class FBActionDriver {
 
     // T2.1/T2.2 dispatch: navigate/click/type/scroll/screenshot/evaluate via WKWebView.
     // click/type resolve @eN via stable mapping WeakRef + fingerprint; stale -> node_stale.
-    private func dispatch(session: FBSession, webview wv: FBWebView, req: BrowserActionRequest, sid: String, traceId: String) -> BrowserStateResponse {
+    private func dispatch(session: FBSession, webview wv: FBWebView, req: BrowserActionRequest, sid: String, traceId: String, cancel: FBCancelToken) -> BrowserStateResponse {
         let startTs = Date().timeIntervalSince1970
+        // A-2: bail fast if the watchdog already cancelled this dispatch (token checked at
+        // entry by the caller too; a mid-flight cancel between entry and here lands here).
+        func cancelled(_ where: String) -> Bool {
+            if cancel.isCancelled {
+                log.warn("Action", "dispatch cancelled at @\(`where`) sess=\(sid)", traceId: traceId, sessionId: sid)
+                return true
+            }
+            return false
+        }
+        if cancelled("entry") { return errorResp(session: session, req: req, traceId: traceId, err: .timeout, startTs: startTs) }
+        // A-4: minimum remaining-watchdog budget for the visual fallback chain (screenshot
+        // + VLM predict + elementFromPoint click). Below this, skip the fallback honestly.
+        let visualFallbackBudgetMs = 1_500
         // E-7: the .screenshot action previously fell through to a plain AXTree extract and
         // never captured an image — the response's screenshot field was always nil. Now capture
         // the real PNG via screenshotSync and carry it into the state response. Non-screenshot
@@ -208,18 +226,41 @@ public final class FBActionDriver {
         var evalResultJson: String? = nil
         switch req.action {
         case .navigate:
+            if cancelled("navigate") { return errorResp(session: session, req: req, traceId: traceId, err: .timeout, startTs: startTs) }
             if let url = req.payloadText { wv.navigate(url: url, timeoutMs: watchdog.navigateMs) }
         case .click:
             if let nid = req.targetNodeId {
-                let mp = session.extractor.resolve(nid)
-                let fp = mp?.fingerprint ?? ""
-                if let raw = wv.evaluateJSSyncArgs(FBWalkerScript.resolveClick, args: [nid, fp]) as? String,
+                if cancelled("click.resolve") { return errorResp(session: session, req: req, traceId: traceId, err: .timeout, startTs: startTs) }
+                // A-3 (1016 audit): resolve MUST succeed — an unmapped @eN with an empty
+                // fingerprint passed the JS `if(expectFp && ...)` guard (empty expectFp is
+                // falsy), so a stale/never-extracted node clicked WHATEVER currently holds
+                // that WeakRef slot (wrong-element click). Fail closed: no mapping ->
+                // node_stale, the caller re-extracts.
+                guard let mp = session.extractor.resolve(nid) else {
+                    log.warn("Action", "click unmapped @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
+                }
+                if let raw = wv.evaluateJSSyncArgs(FBWalkerScript.resolveClick, args: [nid, mp.fingerprint]) as? String,
                    let data = raw.data(using: .utf8),
                    let r = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     let ok = r["ok"] as? Bool ?? false
                     let stale = r["stale"] as? Bool ?? false
-                    if !ok && stale {
+                    if ok {
+                        // clicked
+                    } else if stale {
                         log.warn("Action", "click node_stale @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
+                        // A-4 (1016 audit): the visual fallback chain (screenshot + VLM call +
+                        // elementFromPoint click) needs ~1.5s; if the click watchdog has less
+                        // budget left than that, the fallback would be killed mid-flight by the
+                        // watchdog AND the join wait — wasted work, caller gets timeout anyway.
+                        // Skip it honestly and surface node_stale now.
+                        let elapsed = Int((Date().timeIntervalSince1970 - startTs) * 1000)
+                        let remaining = watchdog.timeout(for: .click) - elapsed
+                        if remaining < visualFallbackBudgetMs {
+                            log.warn("Action", "visual fallback skipped: budget \(remaining)ms < \(visualFallbackBudgetMs)ms sess=\(sid)",
+                                     traceId: traceId, sessionId: sid)
+                            return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
+                        }
                         // T3.4: visual-grounding fallback before surfacing node_stale.
                         if let coord = visualFallback(webview: wv, nodeId: nid, mapping: mp, session: session) {
                             // L-5: validate finite + in-viewport BEFORE string interpolation into
@@ -236,28 +277,63 @@ public final class FBActionDriver {
                             // the scheduler's lastActionKey still holds "click:@eN:" and a second
                             // visual fallback trips repeat-break on a stale key.
                             session.scheduler.noteVisualClick(target: nid)
+                            if cancelled("click.visualClick") { return errorResp(session: session, req: req, traceId: traceId, err: .timeout, startTs: startTs) }
                             let clickJS = "(function(){var e=document.elementFromPoint(\(coord.x),\(coord.y));if(e){e.click();return 'ok';}return 'miss';})();"
-                            _ = wv.evaluateJSSync(clickJS)
-                            log.info("Action", "click visual fallback @\(nid) x=\(coord.x) y=\(coord.y) sess=\(sid)",
-                                     traceId: traceId, sessionId: sid)
+                            // A-1 (1016 audit): the visual click's return was discarded — a
+                            // 'miss' (elementFromPoint found nothing / clicked away) reported
+                            // success to the caller. Fail honestly.
+                            if let vres = wv.evaluateJSSync(clickJS) as? String, vres == "ok" {
+                                log.info("Action", "click visual fallback @\(nid) x=\(coord.x) y=\(coord.y) sess=\(sid)",
+                                         traceId: traceId, sessionId: sid)
+                            } else {
+                                log.warn("Action", "visual click missed sess=\(sid)", traceId: traceId, sessionId: sid)
+                                return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
+                            }
                         } else {
                             return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
                         }
+                    } else {
+                        // A-1: ok:false && !stale is an UNSPECIFIED resolver state (JS contract
+                        // is ok/stale pairs) — the old code silently fell through and reported
+                        // a normal state response, masking a broken click. Fail loud.
+                        log.error("Action", "click resolver non-contract result ok=false stale=false sess=\(sid)", traceId: traceId, sessionId: sid)
+                        return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
                     }
+                } else {
+                    // A-1: raw nil / parse failure = the resolver never answered. Old code
+                    // silently fell through as success. Fail loud.
+                    log.error("Action", "click resolver no/invalid answer sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
                 }
             }
         case .typeText:
             if let nid = req.targetNodeId, let text = req.payloadText {
-                let fp = session.extractor.resolve(nid)?.fingerprint ?? ""
-                if let raw = wv.evaluateJSSyncArgs(FBWalkerScript.resolveType, args: [nid, fp, text]) as? String,
+                if cancelled("type.resolve") { return errorResp(session: session, req: req, traceId: traceId, err: .timeout, startTs: startTs) }
+                // A-3: same fail-closed resolve guard as click — unmapped @eN + empty fp
+                // passed the JS guard and typed into whatever the WeakRef slot held.
+                guard let mp = session.extractor.resolve(nid) else {
+                    log.warn("Action", "type unmapped @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
+                }
+                if let raw = wv.evaluateJSSyncArgs(FBWalkerScript.resolveType, args: [nid, mp.fingerprint, text]) as? String,
                    let data = raw.data(using: .utf8),
                    let r = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     let ok = r["ok"] as? Bool ?? false
                     let stale = r["stale"] as? Bool ?? false
-                    if !ok && stale {
+                    if ok {
+                        // typed
+                    } else if stale {
                         log.warn("Action", "type node_stale @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
                         return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
+                    } else {
+                        // A-1: non-contract resolver result — fail loud (see click branch).
+                        log.error("Action", "type resolver non-contract result sess=\(sid)", traceId: traceId, sessionId: sid)
+                        return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
                     }
+                } else {
+                    // A-1: resolver no/invalid answer — fail loud.
+                    log.error("Action", "type resolver no/invalid answer sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
                 }
             }
         case .scroll:
@@ -298,6 +374,9 @@ public final class FBActionDriver {
         }
         // T2.1: re-extract AXTree after action for state response.
         // H-1: route through THIS session's extractor (per-session mapping isolation).
+        // A-2: the watchdog may have timed out while we worked — do NOT run a full extract
+        // against a session the caller already gave up on (F-15 join bound exists for this).
+        if cancelled("extract") { return errorResp(session: session, req: req, traceId: traceId, err: .timeout, startTs: startTs) }
         let (res, md, audit, err) = session.extractor.extract(webview: wv)
         let ms = Int((Date().timeIntervalSince1970 - startTs) * 1000)
         if let e = err {

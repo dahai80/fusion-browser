@@ -15,6 +15,12 @@ public struct FBError: Error, Codable, Equatable {
     public static let credentialLocked = FBError(code: "credential_locked", message: "Keychain locked or credential missing", retryable: true)
     public static let credentialNotFound = FBError(code: "credential_not_found", message: "no Keychain item for domain", retryable: false)
     public static let credentialInjected = FBError(code: "credential_injection_failed", message: "credential injection failed", retryable: false)
+    // S-1 (1016 audit): a failed Keychain SecItemAdd (disk full, permission) is a STORE
+    // failure — the credential was NOT persisted — and must not be reported with the
+    // injection-failure code (callers conflated it with the webview-inject step, counting
+    // a real failure in the success path). Distinct code, retryable (transient Keychain
+    // conditions recover; a locked keychain is .credentialLocked, see Credentials.store).
+    public static let credentialStoreFailed = FBError(code: "credential_store_failed", message: "Keychain store failed; credential not persisted", retryable: true)
     public static let quotaExceeded = FBError(code: "quota_exceeded", message: "resource quota exceeded", retryable: false)
     public static let evaluateDenied = FBError(code: "evaluate_denied", message: "EVALUATE not permitted: capability or origin not allowed", retryable: false)
     public static let authDenied = FBError(code: "auth_denied", message: "authentication token invalid or missing", retryable: false)
