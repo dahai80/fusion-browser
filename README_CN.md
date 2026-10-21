@@ -16,6 +16,7 @@ macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与
 - **截图推送流** — 面板用独立 UDS 连接 `stream_screenshots`，每次动作/页面加载后推送 `screenshot_frame`（base64 PNG + url/title/seq，200ms 节流 + 在途跳过），会话结束推送一个 `stream_end`。这是只读通道：除会话创建连接外，同主体（相同 token 哈希）也可订阅；控制类操作仍按连接隔离。
 - **配套** — `cookieImport.*` 配置键、`FBStreamHub` + `FBWebView` 发布钩子、Python 客户端（`client/python/fusion_browser_client/`：`import_cookies`/`delete_profile`/`FusionBrowserStream`）、活验收脚本 `scripts/cowork_smoke.py`（release_gate 硬门）。
 - **验收中修掉两个真实缺陷**：所有注入 cookie 都变成 `Secure`（HTTPCookie 把存在的 `.secure` 键一律当 true），导致 http:// 页面收不到；面板流因 E-34 连接级归属返回 `not_owner`，只读通道改为同时放行同主体。
+- **落地后评审又修掉四个真实缺陷**：Chrome 127+ 给 `v10`/`v11` 明文加 32 字节 `SHA256(host_key)` 前缀，导致现代 Chrome/Edge profile 的加密行全部解密失败被跳过（现为校验后剥离）；`profiles.json` 是同机多引擎进程共享的，读写改为持有 `flock`；空闲回收器现在与显式关闭走同一收尾（推送 `stream_end` + 延迟清理 profile store）；新增 `FBAtomicFd`，读写系统调用与 `close()` 持同一把锁，复用的 fd 号不会再收到别人的帧。
 - 契约与 cowork 侧交付物：[`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md)。编译通过，**300 单元测试通过**。
 
 

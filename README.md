@@ -43,6 +43,14 @@ now backs a managed browser panel in fusion-cowork end to end:
   became `Secure` (HTTPCookie treats a present `.secure` key as true) so an
   http:// page never received it; and the panel stream was unreachable from a
   second connection (`not_owner`) — read access now admits the same principal.
+- **Four more defects found by the post-landing review and fixed**: Chrome 127+
+  binds a `v10`/`v11` value with a 32-byte `SHA256(host_key)` prefix, so every
+  encrypted row on a modern Chrome/Edge profile was skipped (now
+  verify-then-stripped); `profiles.json` is shared by every engine process on a
+  host, so its read-modify-write now holds an `flock`; the idle reaper now emits
+  `stream_end` and purges a pending profile store like an explicit close; and a
+  new `FBAtomicFd` keeps every read/write syscall inside the lock `close()` takes,
+  so a reused fd cannot receive another client's frame.
 - Cookbook + cowork deliverables:
   [`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md).
   Build green, **300 tests** pass.

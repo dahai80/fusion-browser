@@ -45,6 +45,21 @@ UUID-scoped (`StreamAccessTests`). Python client gained `import_cookies` /
 `delete_profile` / `profile_id` / `FusionBrowserStream`. Contract:
 `docs/cowork-managed-backend-contract.md`; live harness `scripts/cowork_smoke.py`
 (HARD gate). Build green, **300 tests** pass, Python client 14 pass.
+Post-landing review wave fixed four more real defects: (c) Chrome 127+ binds a
+`v10`/`v11` value with a 32-byte `SHA256(host_key)` prefix, so every encrypted row
+on a modern Chrome/Edge profile failed UTF-8 decode and was skipped —
+`decrypt(_:key:hostKey:)` verify-then-strips it (`testChromiumV10HostKeyHashPrefixStripped`);
+(d) `profiles.json` is shared by every engine process on a host, so its
+read-modify-write now also holds an `flock` (`testFileLockSerializesRegistriesAcrossProcesses`);
+(e) the idle reaper now runs the same `finishClosedSession` as an explicit close —
+one `stream_end` per subscriber + deferred store purge (`testReaperEndsStreamExactlyOnce`);
+(f) `FBAtomicFd` owns each connection's socket number and every read/write syscall
+runs inside the lock `close()` takes, so a reused fd cannot receive another
+client's frame now that the push path adds a second writer
+(`testCloseWaitsForInFlightSyscallAndNeverHandsOutAClosedFd`). The published
+`docs/PROTOCOL.md` §3.6 + contract §6 now state the FLAT shape of
+`screenshot_frame`/`stream_end` (the only non-`payload` envelopes) and the
+`tokenCapabilities` names the parser actually accepts.
 
 **Enterprise-commercial gap wave landed (2026-08-29)** — closes the 4 items the 0828
 product audit's enterprise tier flagged beyond the 6 blockers: H-9 multi-node capacity
