@@ -264,12 +264,16 @@ class FusionBrowserClient:
     # -- ops ---------------------------------------------------------------
 
     def create_session(self, mode: str = "headless", initial_url: Optional[str] = None,
-                       credentials: Optional[list] = None) -> str:
+                       credentials: Optional[list] = None, profile_id: Optional[str] = None) -> str:
         payload: dict = {"mode": mode}
         if initial_url is not None:
             payload["initial_url"] = initial_url
         if credentials is not None:
             payload["credentials"] = credentials
+        # Issue #25: a profile_id keeps this session's cookie/login state in a persistent
+        # WKWebsiteDataStore, so a workflow run can resume a login across engine restarts.
+        if profile_id is not None:
+            payload["profile_id"] = profile_id
         resp = self._request({"type": "create_session", "payload": payload})
         cr = resp.get("payload", {})
         sid = cr.get("session_id")
@@ -321,10 +325,147 @@ class FusionBrowserClient:
         resp = self._request({"type": "capacity"})
         return CapacityInfo.from_dict(resp.get("payload", {}))
 
+    def import_cookies(self, session_id: str, browser: str,
+                       profile: Optional[str] = None) -> dict:
+        """Issue #25: import the user's browser cookies into a live session.
+
+        Requires the token's `importCookies` capability. Returns the engine payload:
+        {session_id, browser, imported, skipped_app_bound, skipped_other}. Chrome/Edge
+        cookies encrypted with v20 app-bound keys cannot be decrypted by any third
+        party — those are counted in skipped_app_bound, never imported.
+        """
+        p: dict = {"session_id": session_id, "browser": browser}
+        if profile is not None:
+            p["profile"] = profile
+        resp = self._request({"type": "import_cookies", "payload": p})
+        log.info("import_cookies browser=%s imported=%s", browser,
+                 resp.get("payload", {}).get("imported"))
+        return resp.get("payload", {})
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Issue #25: delete a persistent profile. True = a profile existed and is gone."""
+        resp = self._request({"type": "delete_profile", "payload": {"profile_id": profile_id}})
+        return bool(resp.get("payload", {}).get("deleted", False))
+
     # -- context manager ---------------------------------------------------
 
     def __enter__(self) -> "FusionBrowserClient":
         self._connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+class FusionBrowserStream:
+    """Issue #25: screenshot push stream for a web side panel.
+
+    Opens its OWN UDS connection — the command connection must stay free for
+    create/execute/close, and the engine's `stream_screenshots` subscription lives
+    for the life of that connection (fusion-gateway dials per op, so a proxied
+    command connection cannot hold a subscription).
+
+    `frames()` is a generator yielding each `screenshot_frame` event dict (png is
+    base64); it returns when the engine sends `stream_end` (session closed) or the
+    connection ends. Re-subscribing means a new stream object.
+    """
+
+    def __init__(self, session_id: str, socket_path: str = _DEFAULT_SOCKET,
+                 token: Optional[str] = None, timeout: Optional[float] = 30.0):
+        self.session_id = session_id
+        self.socket_path = socket_path
+        self.token = token
+        self.timeout = timeout
+        self._sock: Optional[socket.socket] = None
+        self._authed = False
+        self._subscribed = False
+
+    def _connect(self) -> None:
+        if self._sock is not None:
+            return
+        log.debug("stream connect socket=%s session=%s", self.socket_path, self.session_id)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        s.connect(self.socket_path)
+        self._sock = s
+
+    def _recv(self) -> Optional[dict]:
+        assert self._sock is not None
+        try:
+            return FusionBrowserClient._recv_one(self._sock)
+        except (socket.timeout, OSError) as e:
+            self.close()
+            raise FBError("connection_closed", "stream transport fault: %s" % type(e).__name__) from e
+
+    def _auth(self) -> None:
+        if self._authed or self._sock is None:
+            return
+        FusionBrowserClient._send(self._sock, {"type": "auth", "token": self.token})
+        ack = self._recv()
+        if not ack or ack.get("type") != "auth_ack":
+            self.close()
+            if ack is not None and ack.get("type") == "error":
+                raise FBError.from_payload(ack.get("payload", {}))
+            raise FBError("auth_denied", "unexpected frame type: %s" % (ack or {}).get("type", "none"))
+        self._authed = True
+
+    def _subscribe(self) -> None:
+        if self._subscribed or self._sock is None:
+            return
+        FusionBrowserClient._send(self._sock, {
+            "type": "stream_screenshots",
+            "payload": {"session_id": self.session_id, "enabled": True}})
+        resp = self._recv()
+        if resp is None:
+            self.close()
+            raise FBError("connection_closed", "server closed before stream_ack")
+        if resp.get("type") == "error":
+            self.close()
+            raise FBError.from_payload(resp.get("payload", {}))
+        if resp.get("type") != "stream_ack" or not resp.get("payload", {}).get("active"):
+            self.close()
+            raise FBError("stream_denied",
+                          "unexpected subscribe response: %s" % resp.get("type"))
+        self._subscribed = True
+        # After the ack the stream is idle most of the time — a socket timeout would
+        # abort a healthy stream, so block until a frame arrives (close() still unblocks).
+        if self._sock is not None:
+            self._sock.settimeout(None)
+
+    def frames(self):
+        """Yield screenshot_frame event dicts until stream_end or EOF."""
+        self._connect()
+        self._auth()
+        self._subscribe()
+        while True:
+            ev = self._recv()
+            if ev is None:
+                log.debug("stream EOF session=%s", self.session_id)
+                return
+            t = ev.get("type")
+            if t == "stream_end":
+                log.info("stream_end session=%s reason=%s", self.session_id, ev.get("reason"))
+                return
+            if t == "error":
+                raise FBError.from_payload(ev.get("payload", {}))
+            if t == "screenshot_frame":
+                yield ev
+            else:
+                log.debug("stream drop unknown frame type=%s", t)
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        self._authed = False
+        self._subscribed = False
+
+    def __enter__(self) -> "FusionBrowserStream":
+        self._connect()
+        self._auth()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
