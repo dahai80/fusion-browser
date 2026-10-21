@@ -35,11 +35,14 @@ public final class FBStreamHub {
         self.now = now
     }
 
-    // Returns the subscriber count for the session after adding this one.
+    // Returns the subscriber count for the session after adding this one. Idempotent per
+    // connection: a repeated `enabled:true` from the same key REPLACES that key's entry
+    // (a retrying panel must not stack N copies of its own stream — each copy is another
+    // full PNG written to the same fd on every action).
     @discardableResult
     public func subscribe(sessionId: String, key: String, send: @escaping (Data) -> Void) -> Int {
         lock.lock(); defer { lock.unlock() }
-        var subs = subscribers[sessionId] ?? [:]
+        var subs = (subscribers[sessionId] ?? [:]).filter { $0.value.key != key }
         let id = nextSubId
         nextSubId += 1
         subs[id] = Subscriber(key: key, send: send)

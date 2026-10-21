@@ -233,8 +233,7 @@ public final class FBSessionManager {
     // so we CANNOT call close(sessionId:) (it does queue.sync -> self-deadlock on a serial
     // queue). Inline the extraction under the lock, release, then tear down each webview
     // on main outside the lock — the same shape close(sessionId:) uses, minus the queue.sync.
-    private func reapIdle() {
-        let now = Date().timeIntervalSince1970
+    func reapIdle(now: Double = Date().timeIntervalSince1970) {
         let cutoff = now - Double(reaperConfig.idleTimeoutMs) / 1000.0
         var reaped: [FBSession] = []
         // We are already on `queue` (timer source target). Mutate the dict inline — NO
@@ -251,7 +250,34 @@ public final class FBSessionManager {
         FBMetrics.shared.increment("session.reaped", by: reaped.count)
         // Teardown off the lock. s.close() hops to main for AppKit destroy. No logout
         // (reaper is a resource guard, not a credential revocation — logout is explicit).
-        for s in reaped { s.close() }
+        // Issue #25: the reaper is a SECOND close path, so it must run the same finalizers
+        // an explicit close does — stream_end for every subscriber + a deferred profile
+        // store purge. Skipping them left panels blocked forever on a dead session.
+        for s in reaped {
+            s.close()
+            finishClosedSession(s, sid: s.id,
+                                othersLive: sessions.values.contains { $0.profileStoreId == s.profileStoreId })
+        }
+    }
+
+    // Issue #25: everything that must follow a session teardown, shared by BOTH close paths
+    // (explicit close + idle reaper). Caller guarantees the session is already out of
+    // `sessions`; `othersLive` says whether another live session still holds the same
+    // persistent store.
+    private func finishClosedSession(_ s: FBSession, sid: String, othersLive: Bool) {
+        // Terminal stream signal — subscribers get exactly one stream_end and the hub
+        // drops the session's subscriptions (no frames after this point).
+        streamHub?.end(sessionId: sid, reason: "session_closed")
+        // A delete_profile that arrived while this session was live (or a profile already
+        // gone from the registry) frees its WebKit store on the LAST session's close.
+        // A plain close KEEPS the store — that is the point of profiles.
+        guard let pid = s.profileId, let uuid = s.profileStoreId else { return }
+        let profileGone = profiles.entry(profileId: pid) == nil || s.storeDeletionPending
+        guard profileGone, !othersLive else { return }
+        DispatchQueue.main.async {
+            WKWebsiteDataStore.remove(forIdentifier: uuid) { _ in }
+        }
+        log.info("SessionMgr", "profile store removed profileId=\(pid) store=\(uuid)")
     }
 
     // R-5: mark a session active. Called from ActionDriver.execute before dispatch so the
@@ -469,20 +495,21 @@ public final class FBSessionManager {
         // B-5/E-34: owner-aware. A caller whose ownerId does not match the session's owner
         // (and the session is not system-owned) gets .notOwner — the session stays live.
         // ownerId nil (default) = system caller (teardown, reaper, CDP) — always allowed.
-        let extracted: (FBSession?, FBError?) = queue.sync {
-            guard let s = sessions.removeValue(forKey: sid) else { return (nil, .sessionNotFound) }
+        let extracted: (FBSession?, FBError?, Bool) = queue.sync {
+            guard let s = sessions.removeValue(forKey: sid) else { return (nil, .sessionNotFound, false) }
             // B-5/E-34: ownership gates client-to-client. System (ownerId nil — teardown,
             // reaper, CDP) bypasses and may close any session. Two non-nil callers must match.
             if let owner = s.ownerId, let caller = ownerId, owner != caller {
                 // Ownership mismatch: put it back, deny. Never tear down another client's session.
                 sessions[sid] = s
                 log.warn("SessionMgr", "close not_owner sid=\(sid) owner=\(owner) caller=\(caller)")
-                return (nil, .notOwner)
+                return (nil, .notOwner, false)
             }
             // L-15: clear the stable pin ONLY when the pinned session itself closes — a later
             // create re-pins on its next successful entry (firstSessionId == nil check).
             if firstSessionId == sid { firstSessionId = nil }
-            return (s, nil)
+            let othersLive = sessions.values.contains { $0.profileStoreId == s.profileStoreId }
+            return (s, nil, othersLive)
         }
         guard let s = extracted.0 else { return extracted.1 }
         // D11: default retain Keychain; logout=true deletes.
@@ -511,22 +538,7 @@ public final class FBSessionManager {
         }
         if logout, let wv = s.webview { wv.clearCookies() }
         s.close()
-        // Issue #25: terminal stream signal — subscribers get exactly one stream_end and
-        // the hub drops the session's subscriptions (no frames after this point).
-        streamHub?.end(sessionId: sid, reason: "session_closed")
-        // Issue #25: a delete_profile that arrived while this session was live (or a
-        // profile already gone from the registry) frees its WebKit store on the LAST
-        // session's close. A plain close KEEPS the store — that is the point of profiles.
-        if let pid = s.profileId, let uuid = s.profileStoreId {
-            let othersLive = queue.sync { sessions.values.contains { $0.profileStoreId == uuid } }
-            let profileGone = profiles.entry(profileId: pid) == nil || s.storeDeletionPending
-            if profileGone && !othersLive {
-                DispatchQueue.main.async {
-                    WKWebsiteDataStore.remove(forIdentifier: uuid) { _ in }
-                }
-                log.info("SessionMgr", "profile store removed profileId=\(pid) store=\(uuid)")
-            }
-        }
+        finishClosedSession(s, sid: sid, othersLive: extracted.2)
         log.info("SessionMgr", "closed \(sid) logout=\(logout)")
         return nil
     }

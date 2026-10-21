@@ -1,5 +1,6 @@
 import Foundation
 import CommonCrypto
+import CryptoKit
 
 // Issue #25: Chromium (Chrome/Edge) macOS cookie blob decryption.
 // macOS Chromium encrypts the `value` column of the Cookies SQLite DB with
@@ -9,7 +10,12 @@ import CommonCrypto
 // ciphertext; "v20" is M127+ app-bound encryption, which no third-party process
 // can decrypt (it needs the app's own binding key) — reported as .appBound so
 // the caller can count it as a skip, not a failure. A blob with no prefix is
-// legacy plaintext. E-39: values are NEVER logged — only length/status.
+// legacy plaintext.
+// Chrome 127+ (Cookies DB meta version >= 24) BINDS a v10/v11 value to its host:
+// the encrypted plaintext is SHA256(host_key) (32 raw bytes) followed by the value.
+// The caller passes hostKey so the prefix can be verified and stripped; a blind
+// 32-byte slice is wrong (an unbound value that happens to be long would be cut).
+// E-39: values are NEVER logged — only length/status.
 
 public enum FBDecryptStatus: String {
     case ok
@@ -46,14 +52,15 @@ public enum FBChromiumCookieCrypto {
         return key
     }
 
-    public static func decrypt(_ blob: Data, key: Data) -> (value: String?, status: FBDecryptStatus) {
+    public static func decrypt(_ blob: Data, key: Data,
+                               hostKey: String? = nil) -> (value: String?, status: FBDecryptStatus) {
         if blob.count >= 3, blob.prefix(3) == Data("v20".utf8) {
             log.info("Cookie", "v20 app-bound cookie skipped len=\(blob.count)")
             return (nil, .appBound)
         }
         let prefix = blob.prefix(3)
         if prefix == Data("v10".utf8) || prefix == Data("v11".utf8) {
-            return decryptCBC(Data(blob.dropFirst(3)), key: key)
+            return decryptCBC(Data(blob.dropFirst(3)), key: key, hostKey: hostKey)
         }
         guard let plain = String(data: blob, encoding: .utf8) else {
             log.warn("Cookie", "undecryptable blob noPrefix nonUTF8 len=\(blob.count)")
@@ -62,7 +69,8 @@ public enum FBChromiumCookieCrypto {
         return (plain, .plaintext)
     }
 
-    private static func decryptCBC(_ body: Data, key: Data) -> (value: String?, status: FBDecryptStatus) {
+    private static func decryptCBC(_ body: Data, key: Data,
+                                   hostKey: String?) -> (value: String?, status: FBDecryptStatus) {
         let validKey = key.count == kCCKeySizeAES128 || key.count == kCCKeySizeAES192 || key.count == kCCKeySizeAES256
         guard !body.isEmpty, body.count % kCCBlockSizeAES128 == 0, validKey else {
             log.warn("Cookie", "cipher shape invalid len=\(body.count) keyLen=\(key.count)")
@@ -86,11 +94,19 @@ public enum FBChromiumCookieCrypto {
             log.warn("Cookie", "CBC decrypt failed rc=\(rc) len=\(body.count)")
             return (nil, .failed)
         }
-        guard let value = String(data: out.prefix(outLen), encoding: .utf8) else {
-            log.warn("Cookie", "decrypted bytes not UTF-8 len=\(outLen)")
+        var plain = Data(out.prefix(outLen))
+        if let hostKey = hostKey, !hostKey.isEmpty {
+            let bind = Data(SHA256.hash(data: Data(hostKey.utf8)))
+            if plain.count >= bind.count, plain.prefix(bind.count) == bind {
+                plain = Data(plain.dropFirst(bind.count))
+                log.debug("Cookie", "stripped host-key binding prefix host=\(hostKey)")
+            }
+        }
+        guard let value = String(data: plain, encoding: .utf8) else {
+            log.warn("Cookie", "decrypted bytes not UTF-8 len=\(plain.count) hostBound=\(hostKey != nil)")
             return (nil, .failed)
         }
-        log.debug("Cookie", "decrypted cookie len=\(outLen)")
+        log.debug("Cookie", "decrypted cookie len=\(plain.count)")
         return (value, .ok)
     }
 }

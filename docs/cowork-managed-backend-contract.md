@@ -89,12 +89,18 @@ admitted by principal (§6). Set it only for a real per-call-dial proxy.
 
 - `.default` = 95 (no evaluate, no metrics, no import, no profiles).
 - `.all` = 1023.
-- Unknown capability names in config are DROPPED (fail-closed); never broaden
-  by typo.
+- Accepted names are exactly: `navigate`, `click`, `type`, `scroll`,
+  `screenshot`, `evaluate`, `close`, `metrics`, `importcookies`,
+  `persistentprofiles`, `all` (case-insensitive). Note `type` — NOT `type_text`
+  (that is the ACTION name, not the capability) — and the two #25 capabilities
+  have no underscore.
+- Unknown capability names in config are DROPPED with a warning (fail-closed);
+  never broaden by typo, and a typo shows up as `auth_denied`, not as a config
+  error — copy the names above verbatim.
 - The recommended cowork node config is `["all"]`: a workflow both drives and
   streams. A stricter deployment can use
-  `["navigate","click","type_text","scroll","screenshot","close","evaluate",
-  "import_cookies","persistent_profiles"]`.
+  `["navigate","click","type","scroll","screenshot","close","evaluate",
+  "importcookies","persistentprofiles"]`.
 
 ## 4. Session lifecycle with a per-run profile
 
@@ -181,10 +187,14 @@ Subscribe on the PANEL connection (its own socket, same token):
 ```json
 → {"type": "stream_screenshots", "payload": {"session_id": "…", "enabled": true}}
 ← {"type": "stream_ack", "payload": {"session_id": "…", "active": true}}
-← {"type": "screenshot_frame", "payload": {"session_id": "…", "seq": 1,
-     "png": "<base64 PNG>", "url": "https://…", "title": "…", "ts_ms": 1761...}}
-← {"type": "stream_end", "payload": {"session_id": "…", "reason": "session_closed"}}
+← {"type": "screenshot_frame", "session_id": "…", "seq": 1,
+   "png": "<base64 PNG>", "url": "https://…", "title": "…", "ts_ms": 1761...}
+← {"type": "stream_end", "session_id": "…", "reason": "session_closed"}
 ```
+
+`stream_ack` keeps the usual `{type, payload}` shape. The two PUSHED events are
+the exception: their fields are FLAT at the top level (no `payload` wrapper) —
+read `frame["png"]`, not `frame["payload"]["png"]`.
 
 - The ack is sent BEFORE the subscription starts, then one immediate frame
   follows, so the panel is never blank while waiting for the next action.
@@ -199,8 +209,11 @@ Subscribe on the PANEL connection (its own socket, same token):
   (read-only channel). A connection with a different token gets `not_owner`.
   Control (`execute`/`close`) stays connection-scoped — the panel cannot drive.
 - `enabled: false` unsubscribes and acks `active: false`.
-- The stream ends with exactly one `stream_end` when the session closes or the
-  connection drops. Clients must treat `stream_end` and EOF as normal terminal
+- `enabled: true` is idempotent per connection — re-sending it replaces that
+  connection's subscription rather than adding a second copy of the stream.
+- The stream ends with exactly one `stream_end` when the SESSION ends (explicit
+  close, or the idle reaper). A connection drop sends nothing — the stream dies
+  with the socket. Clients must treat `stream_end` AND EOF as normal terminal
   states and re-subscribe only after creating a new session.
 - **Do not route the panel stream through a per-call-dial proxy** — the socket
   close cancels it. Direct UDS only.
@@ -281,10 +294,10 @@ session.
 
 | Layer | Command | Proves |
 |-------|---------|--------|
-| deterministic | `swift test --disable-sandbox` (294) | cookie crypto, import mapping, stream hub, ownership rules, protocol codec |
+| deterministic | `swift test --disable-sandbox` (300) | cookie crypto, import mapping, stream hub, ownership rules, protocol codec |
 | Python client | `cd client/python && pytest tests/` (14) | wire codec + stream client against a fake UDS server |
 | live E2E | `python3 scripts/cowork_smoke.py` | profile + real Firefox import + login + stream frames + engine-restart persistence + delete, all against the release binary |
-| full gate | `scripts/release_gate.sh` | build + 294 tests + 11 live harnesses (cowork_smoke included) |
+| full gate | `scripts/release_gate.sh` | build + 300 tests + 11 live harnesses (cowork_smoke included) |
 
 `scripts/cowork_smoke.py` self-cleans (temp dir, temp profile, engine stop) and
 writes `scripts/cowork-smoke-report.json` with the per-phase evidence. It is a

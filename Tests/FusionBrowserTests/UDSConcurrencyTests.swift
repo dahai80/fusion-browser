@@ -188,3 +188,43 @@ final class SessionManagerConcurrencyTests: XCTestCase {
         XCTAssertEqual(mgr.count(), 0, "no state may appear from failed lookups")
     }
 }
+
+// Issue #25: the screenshot push path added a SECOND writer thread (the stream hub's
+// capture completion) on the same socket. A check-then-write on a bare Int raced the
+// cancel handler's close: the number could be reused by a new accept between the check
+// and the syscall, so one client's frame landed in another client's socket and
+// desynchronized its length-prefixed stream. FBAtomicFd is that invariant.
+final class AtomicFdTests: XCTestCase {
+    func testCloseWaitsForInFlightSyscallAndNeverHandsOutAClosedFd() {
+        var pair: [Int32] = [0, 0]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+        let guardFd = FBAtomicFd(pair[0])
+        let entered = DispatchSemaphore(value: 0)
+        let bodyDone = DispatchSemaphore(value: 0)
+        var handedOut: Int32 = -1
+        var writeResult: Int = -99
+
+        DispatchQueue.global().async {
+            _ = guardFd.withFd { f -> Int32 in
+                entered.signal()
+                Thread.sleep(forTimeInterval: 0.2)
+                var byte: UInt8 = 0x41
+                writeResult = Darwin.write(f, &byte, 1)
+                handedOut = f
+                return 0
+            }
+            bodyDone.signal()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+
+        guardFd.close()
+        XCTAssertEqual(bodyDone.wait(timeout: .now() + 1), .success,
+                       "close must not complete while a syscall is in flight")
+        XCTAssertEqual(writeResult, 1, "the in-flight write must land on a still-open fd")
+        XCTAssertEqual(handedOut, pair[0])
+        XCTAssertNil(guardFd.withFd { $0 }, "a closed guard never hands out its number")
+        XCTAssertEqual(guardFd.value, -1)
+
+        Darwin.close(pair[1])
+    }
+}

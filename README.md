@@ -45,7 +45,7 @@ now backs a managed browser panel in fusion-cowork end to end:
   second connection (`not_owner`) — read access now admits the same principal.
 - Cookbook + cowork deliverables:
   [`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md).
-  Build green, **294 tests** pass.
+  Build green, **300 tests** pass.
 
 Phase 1 engine base + six infra modules + Phase 2 four tasks (AXTree extractor /
 anti-injection sanitizer / CDP compat layer / credential closure) + Phase 3 three
@@ -180,7 +180,7 @@ by the harness not a unit test, per ARCH-3).
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 294 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 300 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 
@@ -231,7 +231,7 @@ R-10 gateway proxy ownership-bypass enable example (`~/.fusion-browser/config.js
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 
-`scripts/release_gate.sh` wires build + the 294 deterministic tests + 11 live hard harnesses into one PASS/FAIL gate (a missing hard harness fails the gate — not a skip). B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-15` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it — the remaining 10 harnesses still run). Both jobs are required status checks — failure blocks merge.
+`scripts/release_gate.sh` wires build + the 300 deterministic tests + 11 live hard harnesses into one PASS/FAIL gate (a missing hard harness fails the gate — not a skip). B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-15` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it — the remaining 10 harnesses still run). Both jobs are required status checks — failure blocks merge.
 
 Visual-grounding enable example (incremental `~/.fusion-browser/config.json`):
 ```json

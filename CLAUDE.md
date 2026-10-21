@@ -44,7 +44,7 @@ token hash) for this READ-ONLY channel, while create/execute/close stay
 UUID-scoped (`StreamAccessTests`). Python client gained `import_cookies` /
 `delete_profile` / `profile_id` / `FusionBrowserStream`. Contract:
 `docs/cowork-managed-backend-contract.md`; live harness `scripts/cowork_smoke.py`
-(HARD gate). Build green, **294 tests** pass, Python client 14 pass.
+(HARD gate). Build green, **300 tests** pass, Python client 14 pass.
 
 **Enterprise-commercial gap wave landed (2026-08-29)** — closes the 4 items the 0828
 product audit's enterprise tier flagged beyond the 6 blockers: H-9 multi-node capacity
@@ -111,7 +111,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 294 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 300 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -138,7 +138,7 @@ pytest tests/ -v   # fake UDS server, no live engine needed
 
 B-6/R-6 CI: `.github/workflows/release-gate.yml` gates PRs to main. Two jobs —
 `build-and-test` (GitHub-hosted `macos-15` arm64: `swift build -c release` +
-`swift test --disable-sandbox`, the 294 deterministic tests, no GUI needed) and
+`swift test --disable-sandbox`, the 300 deterministic tests, no GUI needed) and
 `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]` runner with a
 GUI session: full `scripts/release_gate.sh` — 11 live hard harnesses incl
 `ownership_smoke.py` + `perf_multipage.py`, needs a CoreGraphics display + main

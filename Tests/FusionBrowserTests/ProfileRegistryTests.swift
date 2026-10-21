@@ -84,6 +84,27 @@ final class ProfileRegistryTests: XCTestCase {
         XCTAssertNotNil(e?.storeId)
     }
 
+    // H-9 runs several engine processes on one host, and they share this registry file.
+    // The in-process NSLock does not span processes, so every read-modify-write must also
+    // hold an advisory file lock — otherwise two nodes resolving different profileIds at
+    // the same moment lose one another's entry (a "spontaneously forgotten" login).
+    func testFileLockSerializesRegistriesAcrossProcesses() {
+        let a = FBProfileRegistry(path: path)
+        let b = FBProfileRegistry(path: path)
+        let resolved = DispatchSemaphore(value: 0)
+        a.withFileLock {
+            DispatchQueue.global().async {
+                _ = b.resolve(profileId: "run-2", ownerTokenHash: "hash-a")
+                resolved.signal()
+            }
+            XCTAssertEqual(resolved.wait(timeout: .now() + 0.3), .timedOut,
+                           "a second registry must block while the file lock is held")
+        }
+        XCTAssertEqual(resolved.wait(timeout: .now() + 5), .success,
+                       "resolve must complete once the lock is released")
+        XCTAssertEqual(a.entry(profileId: "run-2")?.ownerTokenHash, "hash-a")
+    }
+
     private func resolve(_ reg: FBProfileRegistry, _ id: String, _ owner: String) throws -> String {
         switch reg.resolve(profileId: id, ownerTokenHash: owner) {
         case .success(let s): return s
