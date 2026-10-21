@@ -122,6 +122,57 @@ final class AuthTests: XCTestCase {
                        "no token configured → never system")
         XCTAssertFalse(noTok.isSystemCaller(token: nil), "no token + nil → not system")
     }
+
+    // Issue #25: privileged surfaces (persistent profiles, cookie import) are NOT in
+    // .default — a scoped token must opt in via tokenCapabilities.
+    func testNewCapsNotDefault() {
+        XCTAssertFalse(FBCapabilities.default.contains(.importCookies))
+        XCTAssertFalse(FBCapabilities.default.contains(.persistentProfiles))
+    }
+
+    func testNewCapsInAll() {
+        XCTAssertTrue(FBCapabilities.all.contains(.importCookies))
+        XCTAssertTrue(FBCapabilities.all.contains(.persistentProfiles))
+    }
+
+    // Existing bit values must never shift (wire/config compat).
+    func testExistingCapsBitsStable() {
+        XCTAssertEqual(FBCapabilities.navigate.rawValue, 1 << 0)
+        XCTAssertEqual(FBCapabilities.click.rawValue, 1 << 1)
+        XCTAssertEqual(FBCapabilities.type.rawValue, 1 << 2)
+        XCTAssertEqual(FBCapabilities.scroll.rawValue, 1 << 3)
+        XCTAssertEqual(FBCapabilities.screenshot.rawValue, 1 << 4)
+        XCTAssertEqual(FBCapabilities.evaluate.rawValue, 1 << 5)
+        XCTAssertEqual(FBCapabilities.close.rawValue, 1 << 6)
+        XCTAssertEqual(FBCapabilities.metrics.rawValue, 1 << 7)
+        XCTAssertEqual(FBCapabilities.importCookies.rawValue, 1 << 8)
+        XCTAssertEqual(FBCapabilities.persistentProfiles.rawValue, 1 << 9)
+    }
+
+    func testParseCapsNewNames() {
+        let caps = FBAuth.parseCaps(["importCookies", "persistentprofiles"])
+        XCTAssertTrue(caps.contains(.importCookies))
+        XCTAssertTrue(caps.contains(.persistentProfiles))
+        XCTAssertFalse(caps.contains(.metrics), "parse names must not broaden")
+    }
+
+    // Issue #25: the profile owner identity is the auth-token hash. ownerKey returns it
+    // only on a matching token (same fail-closed paths as authenticate).
+    func testOwnerKeyMatchesAuthenticate() {
+        let auth = FBAuth(token: "owner-token")
+        let key = auth.ownerKey(token: "owner-token")
+        XCTAssertNotNil(key)
+        XCTAssertEqual(key, auth.ownerKey(token: "owner-token"), "hash must be stable")
+        XCTAssertNotEqual(key, auth.ownerKey(token: "other-token"))
+    }
+
+    func testOwnerKeyFailClosed() {
+        let auth = FBAuth(token: "owner-token")
+        XCTAssertNil(auth.ownerKey(token: "wrong"), "wrong token → no owner key")
+        XCTAssertNil(auth.ownerKey(token: nil), "nil token → no owner key")
+        XCTAssertNil(auth.ownerKey(token: ""), "empty token → no owner key")
+        XCTAssertNil(FBAuth(token: nil).ownerKey(token: "x"), "no token configured → deny")
+    }
 }
 
 // R-3/B-3: metrics read path. FBMetrics.metricsArray() must surface counters +

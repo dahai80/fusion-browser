@@ -20,8 +20,14 @@ public struct FBCapabilities: OptionSet, Codable, Hashable {
     // tokenCapabilities (e.g. ["metrics"] or ["all"]) to read counters/latency quantiles.
     // Without it the UDS metrics request + CDP Performance.getMetrics are cap-gated off.
     public static let metrics  = FBCapabilities(rawValue: 1 << 7)
+    // Issue #25: cookie import reads the user's Keychain + browser profile databases;
+    // NOT in .default — an operator grants it per token (tokenCapabilities).
+    public static let importCookies = FBCapabilities(rawValue: 1 << 8)
+    // Issue #25: persistent profiles write login state that survives restarts —
+    // same privileged tier as import; NOT in .default.
+    public static let persistentProfiles = FBCapabilities(rawValue: 1 << 9)
 
-    public static let all: FBCapabilities = [.navigate, .click, .type, .scroll, .screenshot, .evaluate, .close, .metrics]
+    public static let all: FBCapabilities = [.navigate, .click, .type, .scroll, .screenshot, .evaluate, .close, .metrics, .importCookies, .persistentProfiles]
     public static let `default`: FBCapabilities = [.navigate, .click, .type, .scroll, .screenshot, .close]
 }
 
@@ -78,6 +84,8 @@ public final class FBAuth {
             case "evaluate": caps.insert(.evaluate)
             case "close": caps.insert(.close)
             case "metrics": caps.insert(.metrics)
+            case "importcookies": caps.insert(.importCookies)
+            case "persistentprofiles": caps.insert(.persistentProfiles)
             default:
                 FBLogger.shared.warn("Auth", "unknown tokenCapabilities name=\(raw) dropped (fail-closed)")
             }
@@ -119,6 +127,17 @@ public final class FBAuth {
         let digest = SHA256.hash(data: Data(t.utf8))
         let candidate = Array(digest)
         return constantTimeEqual(candidate, expectedTokenHash)
+    }
+
+    // Issue #25: stable owner identity for persistent profiles. Per-connection UUIDs die
+    // on reconnect and are meaningless through a per-call-dial proxy, so the token hash
+    // (M-6: plaintext never retained) is the only durable client identity. Fail-closed:
+    // nil unless the token authenticates.
+    public func ownerKey(token: String?) -> String? {
+        guard authenticate(token: token) != nil else { return nil }
+        guard let t = token else { return nil }
+        let digest = SHA256.hash(data: Data(t.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // Constant-time byte compare. Length-mismatch is a public fact (digest size), not a
