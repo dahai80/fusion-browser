@@ -145,3 +145,39 @@ final class StreamHubTests: XCTestCase {
         XCTAssertEqual(b.count, 1)
     }
 }
+
+// Issue #25: the side panel subscribes from its OWN UDS connection, so the connection
+// UUID (E-34 owner) never matches the session's. Reading is not control: a freeze-frame
+// channel is allowed for the SAME PRINCIPAL (same auth-token hash, the identity the
+// profile registry already uses) while execute/close stay connection-scoped.
+final class StreamAccessTests: XCTestCase {
+    func testSameConnectionOwnerAllowed() {
+        XCTAssertTrue(FBStreamAccess.allowsRead(sessionOwnerId: "A", sessionOwnerKey: "k1",
+                                                callerOwnerId: "A", callerOwnerKey: "k1"))
+    }
+
+    func testSamePrincipalDifferentConnectionAllowed() {
+        XCTAssertTrue(FBStreamAccess.allowsRead(sessionOwnerId: "A", sessionOwnerKey: "k1",
+                                                callerOwnerId: "B", callerOwnerKey: "k1"))
+    }
+
+    func testDifferentPrincipalDenied() {
+        XCTAssertFalse(FBStreamAccess.allowsRead(sessionOwnerId: "A", sessionOwnerKey: "k1",
+                                                 callerOwnerId: "B", callerOwnerKey: "k2"))
+    }
+
+    func testNilCallerKeyDeniedForForeignSession() {
+        XCTAssertFalse(FBStreamAccess.allowsRead(sessionOwnerId: "A", sessionOwnerKey: "k1",
+                                                 callerOwnerId: "B", callerOwnerKey: nil))
+    }
+
+    func testSystemCallerAllowed() {
+        XCTAssertTrue(FBStreamAccess.allowsRead(sessionOwnerId: "A", sessionOwnerKey: "k1",
+                                                callerOwnerId: nil, callerOwnerKey: nil))
+    }
+
+    func testSystemOwnedSessionAllowed() {
+        XCTAssertTrue(FBStreamAccess.allowsRead(sessionOwnerId: nil, sessionOwnerKey: nil,
+                                                callerOwnerId: "B", callerOwnerKey: "k2"))
+    }
+}

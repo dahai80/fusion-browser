@@ -160,19 +160,21 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     // FR-05: inject full cookie attributes into this session's in-memory dataStore.
     // Stores name/value/domain/path/expires/secure/httponly/samesite (T2.4 full-attr requirement).
     // F-11: returns Bool so the caller reports injection truthfully (was true unconditionally).
-    public func injectCookies(_ attrs: [String: String], domain: String) -> Bool {
-        guard let store = webView?.configuration.websiteDataStore.httpCookieStore,
-              let name = attrs["name"], let value = attrs["value"] else {
-            log.warn("WebView", "cookie inject skip: missing store/name/value domain=\(domain) sess=\(sessionId)")
-            return false
-        }
+    // Issue #25: the cookie SHAPE, isolated from the store so it is unit-testable.
+    // Root cause it fixes: `.secure: Bool` — HTTPCookie treats a PRESENT secure key as
+    // TRUE regardless of the value, so every injected cookie became Secure and an http://
+    // page never received it (document.cookie also hides Secure cookies). Omit the key
+    // unless the source cookie is actually secure. SameSite is passed through as-is
+    // (CFNetwork normalizes the spelling itself).
+    public static func cookieFromAttrs(_ attrs: [String: String], domain: String) -> HTTPCookie? {
+        guard let name = attrs["name"], let value = attrs["value"] else { return nil }
         var props: [HTTPCookiePropertyKey: Any] = [
             .domain: attrs["domain"] ?? domain,
             .path: attrs["path"] ?? "/",
             .name: name,
             .value: value,
-            .secure: attrs["secure"] == "true"
         ]
+        if attrs["secure"] == "true" { props[.secure] = "TRUE" }
         if let expStr = attrs["expires"], let ts = Double(expStr), ts > 0 {
             props[.expires] = Date(timeIntervalSince1970: ts)
         }
@@ -182,7 +184,16 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         if let sameSite = attrs["samesite"], !sameSite.isEmpty {
             props[HTTPCookiePropertyKey(rawValue: "SameSite")] = sameSite
         }
-        guard let cookie = HTTPCookie(properties: props) else {
+        return HTTPCookie(properties: props)
+    }
+
+    public func injectCookies(_ attrs: [String: String], domain: String) -> Bool {
+        guard let store = webView?.configuration.websiteDataStore.httpCookieStore,
+              let name = attrs["name"] else {
+            log.warn("WebView", "cookie inject skip: missing store/name/value domain=\(domain) sess=\(sessionId)")
+            return false
+        }
+        guard let cookie = FBWebView.cookieFromAttrs(attrs, domain: domain) else {
             log.warn("WebView", "cookie build failed name=<masked> domain=\(domain) sess=\(sessionId)")
             return false
         }

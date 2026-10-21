@@ -170,3 +170,58 @@ final class CredentialPasswordMaskTests: XCTestCase {
         XCTAssertFalse(md.contains("********"))
     }
 }
+
+// Issue #25: the cookie SHAPE built for injection, testable without a live WKWebView.
+// Root cause this pins: passing `.secure: false` as a Bool made every injected cookie
+// Secure=TRUE (HTTPCookie treats the key's presence as true), so an http:// page never
+// received it and document.cookie hid it. The helper now omits the key unless secure.
+final class CookieInjectionTests: XCTestCase {
+    private func attrs(_ extra: [String: String]) -> [String: String] {
+        var a = ["name": "session", "value": "ok", "domain": "localhost", "path": "/"]
+        a.merge(extra) { _, new in new }
+        return a
+    }
+
+    func testInsecureCookieIsNotMarkedSecure() {
+        let cookie = FBWebView.cookieFromAttrs(attrs(["secure": "false"]), domain: "localhost")
+        XCTAssertNotNil(cookie)
+        XCTAssertEqual(cookie?.isSecure, false, "secure=false must not become Secure")
+        XCTAssertEqual(cookie?.domain, "localhost")
+        XCTAssertEqual(cookie?.path, "/")
+        XCTAssertEqual(cookie?.name, "session")
+        XCTAssertEqual(cookie?.value, "ok")
+    }
+
+    func testSecureCookieKeepsSecure() {
+        let cookie = FBWebView.cookieFromAttrs(attrs(["secure": "true"]), domain: "localhost")
+        XCTAssertEqual(cookie?.isSecure, true)
+    }
+
+    func testSameSiteIsThreadedThrough() {
+        // CFNetwork normalizes the spelling ("lax"), so assert carried-or-not, not casing.
+        let key = HTTPCookiePropertyKey(rawValue: "SameSite")
+        XCTAssertEqual(FBWebView.cookieFromAttrs(attrs(["samesite": "lax"]), domain: "d")?
+                        .properties?[key] as? String, "lax")
+        XCTAssertEqual(FBWebView.cookieFromAttrs(attrs(["samesite": "strict"]), domain: "d")?
+                        .properties?[key] as? String, "strict")
+        XCTAssertNil(FBWebView.cookieFromAttrs(attrs(["samesite": ""]), domain: "d")?
+                        .properties?[key])
+    }
+
+    func testExpiresAndHttpOnlyThreadedThrough() {
+        // CFNetwork clamps Expires to ~400 days, so pin a date inside that window.
+        let when = Date().addingTimeInterval(30 * 86400)
+        let cookie = FBWebView.cookieFromAttrs(
+            attrs(["expires": String(Int64(when.timeIntervalSince1970)), "httponly": "true"]),
+            domain: "localhost")
+        XCTAssertEqual(cookie?.isSessionOnly, false)
+        let delta = abs((cookie?.expiresDate?.timeIntervalSince1970 ?? 0) - when.timeIntervalSince1970)
+        XCTAssertLessThan(delta, 2.0)
+        XCTAssertEqual(cookie?.isHTTPOnly, true)
+    }
+
+    func testMissingNameOrValueRejected() {
+        XCTAssertNil(FBWebView.cookieFromAttrs(["value": "v"], domain: "d"))
+        XCTAssertNil(FBWebView.cookieFromAttrs(["name": "n"], domain: "d"))
+    }
+}

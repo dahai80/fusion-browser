@@ -106,7 +106,8 @@ func runEngine() {
     let streamHub = FBStreamHub()
     let manager = FBSessionManager(quota: cfg.quota, guards: cfg.guards, watchdog: watchdog,
                                     creds: creds, auth: auth, allowedOrigins: cfg.allowedOrigins,
-                                    sessionReaper: cfg.sessionReaper, streamHub: streamHub)
+                                    sessionReaper: cfg.sessionReaper, streamHub: streamHub,
+                                    cookieImport: cfg.cookieImport)
     let visualLocator = FBVisualLocator(config: cfg.visualLocator)
     if cfg.visualLocator.enabled {
         log.info("Main", "visual locator on model=\(cfg.visualLocator.model) endpoint=\(cfg.visualLocator.endpoint)")

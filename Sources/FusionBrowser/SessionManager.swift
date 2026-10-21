@@ -35,6 +35,11 @@ public final class FBSession {
     // by any caller. A non-nil owner restricts execute/close to that same owner id; a
     // mismatched caller gets `not_owner` at the UDS route. Set once at create, immutable.
     public let ownerId: String?
+    // Issue #25: the creating connection's token hash (FBAuth.ownerKey) — the PRINCIPAL
+    // behind ownerId. Used only for the read-only screenshot stream: a side panel dials
+    // its own connection, so its connection UUID differs, but the same token identifies
+    // the same application. Never widens create/execute/close (those stay UUID-scoped).
+    public let ownerKey: String?
     // Issue #25: persistent profile identity. profileId is the caller's workflow-run
     // label; profileStoreId is the registry's WKWebsiteDataStore UUID. Both nil for the
     // default non-persistent path. storeDeletionPending marks a delete_profile that
@@ -89,8 +94,8 @@ public final class FBSession {
     public let extractor: FBAXTreeExtractor
 
     public init(id: String, mode: WebMode, guards: FBSchedulingGuards, credentialDomain: String?,
-                webview: FBWebView, ownerId: String? = nil, profileId: String? = nil,
-                profileStoreId: UUID? = nil) {
+                webview: FBWebView, ownerId: String? = nil, ownerKey: String? = nil,
+                profileId: String? = nil, profileStoreId: UUID? = nil) {
         self.id = id
         self.mode = mode
         self.createdAt = Date().timeIntervalSince1970
@@ -102,6 +107,7 @@ public final class FBSession {
         self.lastActivityTs = self.createdAt
         self.extractor = FBAXTreeExtractor()
         self.ownerId = ownerId
+        self.ownerKey = ownerKey
         self.profileId = profileId
         self.profileStoreId = profileStoreId
     }
@@ -181,12 +187,15 @@ public final class FBSessionManager {
     // The manager only signals session end + attaches it to each new webview; the UDS
     // route owns subscribe/unsubscribe and the driver owns per-action publishes.
     public let streamHub: FBStreamHub?
+    // Issue #25: browser cookie-import source dirs (config-overridable for harnesses).
+    public let cookieImport: FBCookieImportConfig
 
     public init(quota: FBResourceQuota, guards: FBSchedulingGuards, watchdog: FBWatchdogPolicy,
                 creds: FBCredentialManager, auth: FBAuth, allowedOrigins: [String],
                 sessionReaper: FBSessionReaperConfig = FBSessionReaperConfig(),
                 profiles: FBProfileRegistry = FBProfileRegistry(),
-                streamHub: FBStreamHub? = nil) {
+                streamHub: FBStreamHub? = nil,
+                cookieImport: FBCookieImportConfig = FBCookieImportConfig.default) {
         self.quota = quota
         self.guards = guards
         self.watchdog = watchdog
@@ -196,6 +205,7 @@ public final class FBSessionManager {
         self.reaperConfig = sessionReaper
         self.profiles = profiles
         self.streamHub = streamHub
+        self.cookieImport = cookieImport
     }
 
     // R-5: start the idle reaper. No-op if disabled. Idempotent (guard against double-start).
@@ -366,7 +376,8 @@ public final class FBSessionManager {
             }
             let s = FBSession(id: sid, mode: req.mode, guards: guards,
                               credentialDomain: req.credentialDomain, webview: wv, ownerId: ownerId,
-                              profileId: req.profileId, profileStoreId: resolvedProfileStore)
+                              ownerKey: ownerKey, profileId: req.profileId,
+                              profileStoreId: resolvedProfileStore)
             s.injectedCookieAttrs = injectedAttrs
             s.scheduler.reset()
             s.transition(to: .running)
@@ -533,6 +544,22 @@ public final class FBSessionManager {
     }
 
     public func listIds() -> [String] { return queue.sync { Array(sessions.keys) } }
+
+    // Issue #25: free a deleted profile's WebKit store when NO live session holds it.
+    // Called after delete_profile removed the registry entry: a later close would keep
+    // the store (its session's profileId lookup now misses, but the store UUID must be
+    // removed explicitly or the on-disk login data leaks until the next delete).
+    public func purgeProfileStore(uuid: UUID) {
+        let live = queue.sync { sessions.values.contains { $0.profileStoreId == uuid } }
+        guard !live else {
+            log.info("SessionMgr", "profile store purge deferred (live session) store=\(uuid)")
+            return
+        }
+        DispatchQueue.main.async {
+            WKWebsiteDataStore.remove(forIdentifier: uuid) { _ in }
+        }
+        log.info("SessionMgr", "profile store purged store=\(uuid)")
+    }
 
     // Issue #25: delete_profile arrived while sessions still hold the profile's store.
     // Mark them so each session's close frees the store even if the profileId is
