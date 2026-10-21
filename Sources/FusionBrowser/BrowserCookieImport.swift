@@ -53,7 +53,7 @@ public struct FBImportedCookie {
     }
 }
 
-public struct FBCookieImportConfig {
+public struct FBCookieImportConfig: Codable, Equatable {
     public var chromeUserDataDir: String
     public var edgeUserDataDir: String
     public var firefoxProfilesDir: String
@@ -62,6 +62,16 @@ public struct FBCookieImportConfig {
         self.chromeUserDataDir = chromeUserDataDir
         self.edgeUserDataDir = edgeUserDataDir
         self.firefoxProfilesDir = firefoxProfilesDir
+    }
+
+    // Partial config JSON is allowed per key — a harness can override just the
+    // firefox dir and keep the real chrome/edge defaults.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = FBCookieImportConfig.default
+        chromeUserDataDir = try c.decodeIfPresent(String.self, forKey: .chromeUserDataDir) ?? d.chromeUserDataDir
+        edgeUserDataDir = try c.decodeIfPresent(String.self, forKey: .edgeUserDataDir) ?? d.edgeUserDataDir
+        firefoxProfilesDir = try c.decodeIfPresent(String.self, forKey: .firefoxProfilesDir) ?? d.firefoxProfilesDir
     }
 
     public static let `default`: FBCookieImportConfig = {

@@ -3,7 +3,7 @@
 # swift test covers 0% of the WKWebView live path (ARCH-3: no main run loop under
 # swift test -> evaluateJSSync/screenshotSync deadlock). The live path is verified ONLY
 # by the built release binary + the Python verify harnesses in scripts/. This gate
-# wires them into one PASS/FAIL gate so "237 tests green" can never be misread as a
+# wires them into one PASS/FAIL gate so "294 tests green" can never be misread as a
 # live-path regression pass.
 #
 # E-17~20 (#68): Rust core removed — build is pure Swift now, no plugin, no cargo.
@@ -13,7 +13,7 @@
 #
 # Gate stages (each is a hard gate — first failure aborts with non-zero exit):
 #   1. swift build -c release --disable-sandbox   (pure Swift, no plugin)
-#   2. swift test --disable-sandbox               (deterministic unit tests, 237)
+#   2. swift test --disable-sandbox               (deterministic unit tests, 294)
 #   3. live-path verify harnesses against the release binary:
 #        verify_nonpersistent.py  (FR-04 non-persistence)
 #        navigate_execute_smoke.py (create-no-url -> execute navigate -> extract)
@@ -25,6 +25,8 @@
 #        uma_coexist.py            (UMA coexistence baseline)
 #        ownership_smoke.py        (B-5/E-34 session ownership: not_owner on cross-client op)
 #        perf_multipage.py         (R-7 10-page AXTree compression SLA ≥90%, hard gate)
+#        cowork_smoke.py           (#25 managed-backend E2E: profile + cookie import +
+#                                   login + screenshot stream + restart persistence)
 #      perf_bench.py is informational (perf, not correctness), NOT a hard gate —
 #      runs last and its failure is logged but non-fatal.
 #      multinode_smoke.py is informational (multi-process can be resource-flaky in CI; the
@@ -44,7 +46,7 @@ SKIP_PERF=0
 # --skip-tests: skip stage 2 (swift test). Use on runners where the deterministic
 # suite is already gated by a separate job (e.g. the self-hosted live-path runner,
 # whose Keychain is not interactive for the xctest subprocess -> credential tests
-# would fail with errSecInteractionNotAllowed; build-and-test covers the 237 suite).
+# would fail with errSecInteractionNotAllowed; build-and-test covers the 294 suite).
 SKIP_TESTS=0
 [[ "${1:-}" == "--skip-tests" ]] && SKIP_TESTS=1
 
@@ -68,9 +70,9 @@ run_gate() {
 # --- stage 1: build ---
 run_gate "swift build -c release" swift build -c release --disable-sandbox
 
-# --- stage 2: deterministic tests (237) ---
+# --- stage 2: deterministic tests (294) ---
 if [[ "$SKIP_TESTS" -eq 0 ]]; then
-    run_gate "swift test (237)" swift test --disable-sandbox
+    run_gate "swift test (294)" swift test --disable-sandbox
 else
     info "stage 2 skipped (--skip-tests): deterministic suite gated elsewhere"
 fi
@@ -89,6 +91,7 @@ HARD_HARNESSES=(
     "scripts/uma_coexist.py"
     "scripts/ownership_smoke.py"
     "scripts/perf_multipage.py"
+    "scripts/cowork_smoke.py"
 )
 # T-5 (1016 audit): verify_gateway_r10.py is the end-to-end gateway<->browser
 # capacity-plane proof, but it is CROSS-PROJECT — it needs the fusion-gateway

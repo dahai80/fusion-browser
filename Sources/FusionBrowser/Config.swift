@@ -259,6 +259,9 @@ public struct FBEngineConfig: Codable {
     public var sessionReaper: FBSessionReaperConfig
     // H-8: per-client rate limit (main-thread fair scheduling). Default ON.
     public var rateLimit: FBRateLimitConfig
+    // Issue #25: cookie-import source dirs. Defaults are the real macOS browser
+    // locations; overridable so a harness/CI can point at a temp fixture profile.
+    public var cookieImport: FBCookieImportConfig
 
     public init(socketPath: String = "/tmp/fusion-browser.sock",
                 cdpPort: Int = 9222, cdpEnabled: Bool = false,
@@ -272,7 +275,8 @@ public struct FBEngineConfig: Codable {
                 visualLocator: FBVisualLocatorConfig = FBVisualLocatorConfig(),
                 memoryWatchdog: FBMemoryWatchdogConfig = FBMemoryWatchdogConfig(),
                 sessionReaper: FBSessionReaperConfig = FBSessionReaperConfig(),
-                rateLimit: FBRateLimitConfig = FBRateLimitConfig()) {
+                rateLimit: FBRateLimitConfig = FBRateLimitConfig(),
+                cookieImport: FBCookieImportConfig = FBCookieImportConfig.default) {
         self.socketPath = socketPath
         self.cdpPort = cdpPort
         self.cdpEnabled = cdpEnabled
@@ -288,12 +292,13 @@ public struct FBEngineConfig: Codable {
         self.memoryWatchdog = memoryWatchdog
         self.sessionReaper = sessionReaper
         self.rateLimit = rateLimit
+        self.cookieImport = cookieImport
     }
 
     public static let `default` = FBEngineConfig()
 
     enum CodingKeys: String, CodingKey {
-        case socketPath, cdpPort, cdpEnabled, authToken, tokenCapabilities, tokenSystemCaller, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog, sessionReaper, rateLimit
+        case socketPath, cdpPort, cdpEnabled, authToken, tokenCapabilities, tokenSystemCaller, allowedOrigins, quota, guards, watchdog, logLevel, visualLocator, memoryWatchdog, sessionReaper, rateLimit, cookieImport
     }
 
     public init(from decoder: Decoder) throws {
@@ -314,6 +319,7 @@ public struct FBEngineConfig: Codable {
         memoryWatchdog = try c.decodeIfPresent(FBMemoryWatchdogConfig.self, forKey: .memoryWatchdog) ?? d.memoryWatchdog
         sessionReaper = try c.decodeIfPresent(FBSessionReaperConfig.self, forKey: .sessionReaper) ?? d.sessionReaper
         rateLimit = try c.decodeIfPresent(FBRateLimitConfig.self, forKey: .rateLimit) ?? d.rateLimit
+        cookieImport = try c.decodeIfPresent(FBCookieImportConfig.self, forKey: .cookieImport) ?? d.cookieImport
     }
 }
 

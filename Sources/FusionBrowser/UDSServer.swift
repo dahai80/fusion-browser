@@ -451,7 +451,7 @@ final class FBClientConnection {
                 send(error: e)
             case .success(let session):
                 guard let wv = session.webview else { send(error: .sessionClosing); return }
-                let importer = FBBrowserCookieImporter(config: FBCookieImportConfig.default) { [weak self] kind in
+                let importer = FBBrowserCookieImporter(config: manager.cookieImport) { [weak self] kind in
                     self?.cookieKey(kind)
                 }
                 guard case .success(let imported) = importer.importCookies(kind: kind, profile: r.profile) else {
@@ -476,11 +476,22 @@ final class FBClientConnection {
             // Push needs .screenshot (same data class as the pull path) + an owner match.
             guard caps.contains(.screenshot) else { send(error: .authDenied); return }
             guard let hub = streamHub else { send(error: .invalidRequest); return }
-            switch manager.get(r.sessionId, ownerId: effectiveOwner) {
+            // Issue #25: the side panel subscribes from its OWN connection, so the
+            // connection-UUID owner (E-34) cannot match. Streaming is read-only, so admit
+            // the same PRINCIPAL (equal token hash) too — control stays UUID-scoped.
+            switch manager.get(r.sessionId, ownerId: nil) {
             case .failure(let e):
                 send(error: e)
             case .success(let session):
                 guard let wv = session.webview else { send(error: .sessionClosing); return }
+                guard FBStreamAccess.allowsRead(sessionOwnerId: session.ownerId,
+                                                sessionOwnerKey: session.ownerKey,
+                                                callerOwnerId: effectiveOwner,
+                                                callerOwnerKey: connectionOwnerKey) else {
+                    log.warn("Client", "stream_screenshots not_owner sess=\(r.sessionId) fd=\(fd)")
+                    send(error: .notOwner)
+                    return
+                }
                 if r.enabled {
                     // Ack BEFORE subscribing so the caller's first read is the ack (a
                     // capture-triggered frame can otherwise win the race on the socket).
@@ -502,7 +513,9 @@ final class FBClientConnection {
             // denied (profile_denied / not_owner). System callers may delete any profile.
             guard caps.contains(.persistentProfiles) else { send(error: .authDenied); return }
             guard isSystemCaller || connectionOwnerKey != nil else { send(error: .profileDenied); return }
-            let existed = manager.profiles.entry(profileId: r.profileId) != nil
+            // Capture the store id BEFORE the registry entry is removed — the delete path
+            // needs it to free the on-disk WebKit store after the fact.
+            let entry = manager.profiles.entry(profileId: r.profileId)
             if let err = manager.profiles.delete(profileId: r.profileId,
                                                  ownerTokenHash: connectionOwnerKey ?? "",
                                                  isSystemCaller: isSystemCaller) {
@@ -511,8 +524,11 @@ final class FBClientConnection {
                 return
             }
             manager.markProfileDeleted(profileId: r.profileId)
-            log.info("Client", "delete_profile profileId=\(r.profileId) existed=\(existed) fd=\(fd)")
-            send(resp: .profileDeleted(ProfileDeletedResponse(profileId: r.profileId, deleted: existed)))
+            if let storeId = entry?.storeId, let uuid = UUID(uuidString: storeId) {
+                manager.purgeProfileStore(uuid: uuid)
+            }
+            log.info("Client", "delete_profile profileId=\(r.profileId) existed=\(entry != nil) fd=\(fd)")
+            send(resp: .profileDeleted(ProfileDeletedResponse(profileId: r.profileId, deleted: entry != nil)))
         case .capacity:
             // H-9: per-node capacity report — the scheduler-placement input for an external
             // scheduler (fusion-gateway; cross-node scheduling/migration lands there per

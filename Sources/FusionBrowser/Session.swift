@@ -12,6 +12,20 @@ public enum FBSessionState: String, Codable {
     case permanentFail = "permanent_fail"
 }
 
+// Issue #25: read-access rule for the screenshot stream. E-34 ownership is
+// CONNECTION-scoped (a per-dial UUID), which fits control actions but not a side panel
+// that opens its own socket. Streaming is a read-only freeze-frame channel, so it also
+// admits the same PRINCIPAL (equal token hash — the identity the profile registry
+// already scopes by). Control (execute/close) never uses this rule.
+public enum FBStreamAccess {
+    public static func allowsRead(sessionOwnerId: String?, sessionOwnerKey: String?,
+                                  callerOwnerId: String?, callerOwnerKey: String?) -> Bool {
+        guard let so = sessionOwnerId, let co = callerOwnerId, so != co else { return true }
+        guard let sk = sessionOwnerKey, let ck = callerOwnerKey else { return false }
+        return sk == ck
+    }
+}
+
 public enum FBSchedulingDecision: Equatable {
     case accept
     case rejectMaxActions(FBError)
