@@ -49,6 +49,11 @@ public struct FBError: Error, Codable, Equatable {
     // 2000 blocking driver.execute on main. Not retryable as a per-frame denial — the
     // excess frames are buffered and drained on subsequent reads (lossless backpressure).
     public static let busy = FBError(code: "busy", message: "per-client in-flight batch cap reached; retry later", retryable: true)
+    // Issue #25: persistent-profile access denied — a different token owns the profile
+    // (login state must never cross trust domains), or the caller has no token identity.
+    public static let profileDenied = FBError(code: "profile_denied", message: "persistent profile owned by another client or not attributable to a token", retryable: false)
+    // Issue #25: cookie import refused (Keychain consent denied / browser source unreadable).
+    public static let importDenied = FBError(code: "import_denied", message: "cookie import denied: browser source unreadable or Keychain access refused", retryable: false)
 }
 
 public enum FBResult<T> {
