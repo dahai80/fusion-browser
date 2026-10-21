@@ -172,9 +172,13 @@ public final class FBVisualLocator {
     }
 
     // Coerce a JSON number (Double or Int) to Double; reject strings/nil/other types.
+    // M-16 (1016 audit): reject BOOLEAN NSNumber. `true as? Double` bridges to 1.0
+    // (NSNumber type coercion), so a hallucinated {"x":true,"y":true} parsed as (1,1)
+    // — a syntactic "number" the VLM never emitted. Check the CF type before the
+    // numeric bridging so booleans fail closed.
     private func numberValue(_ v: Any?) -> Double? {
-        if let d = v as? Double { return d }
-        if let i = v as? Int { return Double(i) }
-        return nil
+        guard let n = v as? NSNumber else { return nil }
+        if CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+        return n.doubleValue
     }
 }
