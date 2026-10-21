@@ -3,12 +3,21 @@
 > 文档版本：Phase 4 生产化加固落地（2026-08-26）
 > 依据：`architecture/fusion-browser-prd-0826.md` (v2.0) + `audit/fusion-browser-audit-0826.md`
 > 配套技术方案：`~/fusion/fusion-browser-prd-plan-0826.md`
-> 文档：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/PROTOCOL.md`](docs/PROTOCOL.md) · [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+> 文档：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/PROTOCOL.md`](docs/PROTOCOL.md) · [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) · [`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md)
 > 双语：本文为中文，英文版见 [`README.md`](README.md)（默认）。
 
 macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与结构化交互终端，兼顾 fusion-cowork CDP 自动化复用。基于 macOS Native WebKit (WKWebView)，双协议栈（UDS 长度前缀 JSON 主路径 + CDP-over-WS 兼容层），内建六大基础设施。
 
 ## 当前状态（Phase 4 生产化加固已落地）
+
+**cowork 受管浏览器后端已落地（issue #25，2026-10-21）** — 引擎端到端支撑 fusion-cowork 的内建浏览器面板：
+- **每次工作流运行一个持久 profile** — `create_session` 接受 `profile_id`，底层是持久化 `WKWebsiteDataStore`（macOS 14+），登录态在会话关闭、引擎重启后仍在。profile 按调用方 auth-token 哈希归属（别的 token 得到 `profile_denied`）；`delete_profile` 删除注册表条目与磁盘 store。新增能力 `persistentProfiles`（1<<9），默认关闭。
+- **cookie / 登录态导入** — `import_cookies` 读取用户真实浏览器 profile：Firefox `cookies.sqlite`（明文、属性完整）、Chrome/Edge（AES-128-CBC，密钥取自 macOS Keychain "Safe Storage"，支持 `v10`/`v11` 解密，`v20` app-bound 计入 skipped）。计数诚实——`imported` 只统计真正写入会话 cookie store 的条数。新增能力 `importCookies`（1<<8），默认关闭。
+- **截图推送流** — 面板用独立 UDS 连接 `stream_screenshots`，每次动作/页面加载后推送 `screenshot_frame`（base64 PNG + url/title/seq，200ms 节流 + 在途跳过），会话结束推送一个 `stream_end`。这是只读通道：除会话创建连接外，同主体（相同 token 哈希）也可订阅；控制类操作仍按连接隔离。
+- **配套** — `cookieImport.*` 配置键、`FBStreamHub` + `FBWebView` 发布钩子、Python 客户端（`client/python/fusion_browser_client/`：`import_cookies`/`delete_profile`/`FusionBrowserStream`）、活验收脚本 `scripts/cowork_smoke.py`（release_gate 硬门）。
+- **验收中修掉两个真实缺陷**：所有注入 cookie 都变成 `Secure`（HTTPCookie 把存在的 `.secure` 键一律当 true），导致 http:// 页面收不到；面板流因 E-34 连接级归属返回 `not_owner`，只读通道改为同时放行同主体。
+- 契约与 cowork 侧交付物：[`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md)。编译通过，**294 单元测试通过**。
+
 
 Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，99 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
 
@@ -68,7 +77,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug（纯 Swift，无插件）
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 213 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
+swift test --disable-sandbox   # 294 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
 swift test --disable-sandbox --filter CDPServerTests   # 单个测试套
 ```
 
@@ -116,7 +125,7 @@ P4-2 RSS 自重启启用示例：
 
 均驱动 release 二进制（`swift build -c release` 后执行），live WKWebView 不在 `swift test` 覆盖范围。
 
-`scripts/release_gate.sh` 把 build + 198 确定性测试 + 9 个活脚本串成一个 PASS/FAIL 门。B-6/R-6 CI：`.github/workflows/release-gate.yml` 每个 PR 触发——`build-and-test` 跑在 GitHub-hosted `macos-14` runner，`live-path-gate` 跑在 self-hosted `[self-hosted, macos, arm64, gui]` runner（WKWebView 需 GUI session；`uma_coexist` 需 `:11434` 上的 fusion-mlx，设 `SKIP_UMA=1` 可跳过）。两个 job 均为必需状态检查——失败阻断合入。
+`scripts/release_gate.sh` 把 build + 294 确定性测试 + 11 个活脚本串成一个 PASS/FAIL 门。B-6/R-6 CI：`.github/workflows/release-gate.yml` 每个 PR 触发——`build-and-test` 跑在 GitHub-hosted `macos-14` runner，`live-path-gate` 跑在 self-hosted `[self-hosted, macos, arm64, gui]` runner（WKWebView 需 GUI session；`uma_coexist` 需 `:11434` 上的 fusion-mlx，设 `SKIP_UMA=1` 可跳过）。两个 job 均为必需状态检查——失败阻断合入。
 
 视觉定位启用示例（`~/.fusion-browser/config.json` 增量）：
 ```json

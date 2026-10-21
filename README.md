@@ -3,7 +3,7 @@
 > Doc version: Phase 4 production-hardening landed (2026-08-26)
 > Spec: `architecture/fusion-browser-prd-0826.md` (v2.0) + `audit/fusion-browser-audit-0826.md`
 > Plan: `~/fusion/fusion-browser-prd-plan-0826.md`
-> Docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/PROTOCOL.md`](docs/PROTOCOL.md) · [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+> Docs: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/PROTOCOL.md`](docs/PROTOCOL.md) · [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) · [`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md)
 > Bilingual: this file is English (default) — see [`README_CN.md`](README_CN.md) for Chinese.
 
 macOS native controlled browser engine. Provides Web visual + structured
@@ -13,6 +13,39 @@ interaction for `fusion-agent-studio`, with CDP-automation reuse for
 built-in infrastructure modules.
 
 ## Current State (Phase 4 production-hardening landed)
+
+**cowork managed-browser backend landed (issue #25, 2026-10-21)** — the engine
+now backs a managed browser panel in fusion-cowork end to end:
+
+- **Persistent profiles per workflow run** — `create_session` takes a
+  `profile_id` backed by a persistent `WKWebsiteDataStore` (macOS 14+), so a
+  run's login survives a session close AND an engine restart. Profiles are
+  owned by the calling AUTH-TOKEN hash (`profile_denied` for another token);
+  `delete_profile` drops the registry entry and the on-disk store. New
+  capability `persistentProfiles` (1<<9), OFF by default.
+- **Cookie / login-state import** — `import_cookies` reads the user's real
+  browser profile: Firefox `cookies.sqlite` (plaintext, full fidelity), Chrome
+  and Edge (AES-128-CBC, key from the macOS Keychain "Safe Storage" item,
+  `v10`/`v11` decrypt, `v20` app-bound reported as skipped). Counters are
+  honest — `imported` counts cookies actually committed to the session store.
+  New capability `importCookies` (1<<8), OFF by default.
+- **Screenshot push stream** — `stream_screenshots` on a dedicated UDS
+  connection pushes `screenshot_frame` (base64 PNG + url/title/seq) after each
+  action and page load (200 ms throttle, in-flight skip) and ends with one
+  `stream_end`. Read-only channel: admitted for the session's connection or the
+  same principal (token hash); control stays connection-scoped.
+- **Wiring** — `cookieImport.*` config keys, `FBSessionManager.cookieImport`,
+  `FBStreamHub` + `FBWebView` publish hooks, a Python client
+  (`client/python/fusion_browser_client/`) with `import_cookies` /
+  `delete_profile` / `FusionBrowserStream`, and the live harness
+  `scripts/cowork_smoke.py` (a hard release-gate harness).
+- **Two live-path bugs found and fixed while verifying**: every injected cookie
+  became `Secure` (HTTPCookie treats a present `.secure` key as true) so an
+  http:// page never received it; and the panel stream was unreachable from a
+  second connection (`not_owner`) — read access now admits the same principal.
+- Cookbook + cowork deliverables:
+  [`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md).
+  Build green, **294 tests** pass.
 
 Phase 1 engine base + six infra modules + Phase 2 four tasks (AXTree extractor /
 anti-injection sanitizer / CDP compat layer / credential closure) + Phase 3 three
@@ -147,7 +180,7 @@ by the harness not a unit test, per ARCH-3).
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug (pure Swift, no plugin)
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 213 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
+swift test --disable-sandbox   # 294 tests (--disable-sandbox no longer required: plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests   # single test class
 ```
 
@@ -194,10 +227,11 @@ R-10 gateway proxy ownership-bypass enable example (`~/.fusion-browser/config.js
 | `scripts/navigate_execute_smoke.py` | navigate-via-execute SIGTRAP fix (execute navigate off-main → engine stays alive, page loads) | terminal PASS/FAIL |
 | `scripts/verify_gateway_r10.py` | R-10 system-caller bypass + E-40 blank-page screenshot (multi-node proxied screenshot PNG) | `scripts/gateway-r10-report.json` |
 | `scripts/perf_multipage.py` | R-7 10-page AXTree compression SLA (tiktoken metric; ≥8 scored pages required) | `scripts/perf-multipage-report.json` |
+| `scripts/cowork_smoke.py` | #25 managed backend E2E: persistent profile + real cookie import + login + screenshot stream + engine-restart persistence + delete_profile | `scripts/cowork-smoke-report.json` |
 
 All drive the release binary (run after `swift build -c release`); live WKWebView is out of `swift test` scope.
 
-`scripts/release_gate.sh` wires build + the 230 deterministic tests + 10 live hard harnesses into one PASS/FAIL gate (a missing hard harness fails the gate — not a skip). B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-15` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it — the remaining 9 harnesses still run). Both jobs are required status checks — failure blocks merge.
+`scripts/release_gate.sh` wires build + the 294 deterministic tests + 11 live hard harnesses into one PASS/FAIL gate (a missing hard harness fails the gate — not a skip). B-6/R-6 CI: `.github/workflows/release-gate.yml` runs it on every PR — `build-and-test` on a GitHub-hosted `macos-15` runner, then `live-path-gate` on a self-hosted `[self-hosted, macos, arm64, gui]` runner (WKWebView needs a GUI session; `uma_coexist` needs fusion-mlx on `:11434`, set `SKIP_UMA=1` to skip it — the remaining 10 harnesses still run). Both jobs are required status checks — failure blocks merge.
 
 Visual-grounding enable example (incremental `~/.fusion-browser/config.json`):
 ```json
@@ -217,6 +251,10 @@ Full wire reference: [`docs/PROTOCOL.md`](docs/PROTOCOL.md). Summary:
    - create session: `{"type":"create_session","payload":{"mode":"headless","initial_url":null,"max_actions":null,"task_timeout_ms":null,"credential_domain":null}}`
    - execute action: `{"type":"execute","payload":{"session_id":"...","action":"click","target_node_id":"e1","payload_text":null,"trace_id":"..."}}`
    - close session: `{"type":"close","session_id":"..."}`
+   - create with a persistent profile: `{"type":"create_session","payload":{"mode":"headless","profile_id":"run-abc"}}` (needs the `persistentProfiles` cap)
+   - import browser cookies: `{"type":"import_cookies","payload":{"session_id":"...","browser":"firefox","profile":null}}` (needs `importCookies`)
+   - panel stream (own connection): `{"type":"stream_screenshots","payload":{"session_id":"...","enabled":true}}` → `stream_ack`, then pushed `screenshot_frame` events → `stream_end`
+   - delete a profile: `{"type":"delete_profile","payload":{"profile_id":"run-abc"}}`
 4. JSON keys are snake_case (aligned to the schema). `target_node_id` is BARE `eN` (not `@eN`).
 
 Smoke client: `python3 scripts/smoke_client.py <token>` (default socket `/tmp/fusion-browser-smoke.sock`, needs a matching config).
@@ -252,11 +290,15 @@ NOT real Chrome — a shim translating cowork `cdp_client.py`'s real CDP transpo
 | `AXWalker.swift` | T2.1 injected JS walker script + stable mapping (structural fingerprint/WeakRef) + FBExtractedNode/Result |
 | `AXTree.swift` | T2.1 extractor (extract→parse→install mapping→Markdown reduction) + T2.2 sanitizer rule catalog/purge policy + reducer |
 | `WebView.swift` | FR-04/06 WKWebView wrapper (Headless offscreen / Headed window, non-persistent dataStore) + `evaluateJSSync`/`screenshotSync` (off-main semaphore) + full cookie-attribute injection |
-| `SessionManager.swift` | FR-04/08 session lifecycle + quota enforcement (main-thread WKWebView creation) + `firstSession` (CDP shim target mapping) |
+| `SessionManager.swift` | FR-04/08 session lifecycle + quota enforcement (main-thread WKWebView creation) + `firstSession` (CDP shim target mapping) + #25 profile store resolution/teardown |
 | `ActionDriver.swift` | FR-06 action dispatch + NFR-R tiered watchdog + crash-rebuild replay policy + EVALUATE origin check + node-id normalize (strip leading @) + T3.4 click node_stale visual fallback |
 | `UDSServer.swift` | FR-09/10 POSIX socket UDS server + per-client read loop + auth routing |
 | `CDPServer.swift` | T2.3/T3.3 CDP-WS shim: POSIX TCP + HTTP discovery + WS upgrade + frame codec + `FBCDPTranslator` (CDP method→ActionDriver, extended Network/Console/Emulation/Page.lifecycleEvent/DOM) + `FBCDPEventEmitter` (events decoupled, deterministic unit-testable) |
 | `VisualLocator.swift` | T3.4 visual-grounding fallback: screenshot→fusion-mlx VLM `/v1/chat/completions` predicts `{x,y}` + OOB guards; pluggable `FBHTTPClient` |
+| `CookieCrypto.swift` | #25 Chromium cookie decryption (AES-128-CBC, PBKDF2 key from the Keychain Safe Storage password, `v10`/`v11`, `v20` app-bound detection) |
+| `BrowserCookieImport.swift` | #25 Chrome/Edge/Firefox cookie readers + Keychain Safe Storage lookup + `FBCookieImportConfig` (temp copy incl. `-wal`/`-shm`, counts only in logs) |
+| `StreamHub.swift` | #25 screenshot push hub: per-session subscribers, 200 ms throttle, in-flight skip, one `stream_end` per subscriber |
+| `ProfileRegistry.swift` | #25 persistent-profile registry (`~/.fusion-browser/profiles.json`, token-hash ownership, atomic 0600 writes, corrupt→empty) |
 
 > Removed in E-17~20 / #68: `FBCoreBridge.swift`, `FBCoreWorkerPool.swift`, `Sources/FBCoreRust/`, `Plugins/FBCoreRustBuilder/`, `rust/fb-core/` — the Rust core path. The AXTree compile now runs pure Swift (`FBAXTreeReducer.toMarkdown` + `JSONDecoder`) in `AXTree.swift`'s `FBAXTreeExtractor.extract`, the path the Rust core always degraded to.
 

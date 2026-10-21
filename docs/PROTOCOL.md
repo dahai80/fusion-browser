@@ -1,7 +1,9 @@
 # Wire Protocol Reference
 
 > fusion-browser UDS + CDP wire contract. Schema source of truth: `Sources/FusionBrowser/Protocol.swift`.
-> Doc version: Phase 4 (2026-08-27). Contract for consumers: `architecture/agent-studio-integration-contract-0826.md`.
+> Doc version: issue #25 (2026-10-21). Consumer contracts:
+> `architecture/agent-studio-integration-contract-0826.md` (agent-studio) and
+> `docs/cowork-managed-backend-contract.md` (fusion-cowork managed browser).
 
 ## 1. Framing
 
@@ -25,11 +27,19 @@ Request (`FBRequest`, discriminator `type`):
 - `create_session` — `{type, payload: CreateSessionRequest}`
 - `execute` — `{type, payload: BrowserActionRequest}`
 - `close` — `{type, session_id}`
+- `metrics` — `{type}`
+- `capacity` — `{type}`
+- `import_cookies` — `{type, payload: ImportCookiesRequest}` (#25)
+- `stream_screenshots` — `{type, payload: StreamScreenshotsRequest}` (#25)
+- `delete_profile` — `{type, payload: DeleteProfileRequest}` (#25)
 
 Response (`FBResponse`, discriminator `type`):
 - `create_session` — `{type, payload: CreateSessionResponse}`
 - `state` — `{type, payload: BrowserStateResponse}`
 - `closed` — `{type, session_id}`
+- `metrics` / `capacity` / `profile_deleted` / `import_cookies` — `{type, payload}` (last two #25)
+- `stream_ack` — `{type, payload: StreamAckResponse}` (#25)
+- `screenshot_frame` / `stream_end` — PUSH frames, no request id (#25, §3.6)
 - `error` — `{type, payload: FBError}`
 
 ## 3. Message Types
@@ -55,12 +65,17 @@ Request:
              "initial_url": null,
              "max_actions": null,
              "task_timeout_ms": null,
-             "credential_domain": null}}
+             "credential_domain": null,
+             "profile_id": null}}
 ```
 - `mode`: `"headless"` (default) | `"headed"` (popup window, debug)
 - `initial_url`: optional, navigate on create
 - `max_actions` / `task_timeout_ms`: optional scheduling-guard overrides
 - `credential_domain`: optional, triggers Keychain credential inject (§8 of contract)
+- `profile_id` (#25): optional persistent profile (login state on disk, survives
+  close + engine restart). Requires `persistentProfiles`; omitted = the default
+  in-memory store. Owned by the creating token's hash → `profile_denied` for
+  another token.
 
 Response:
 ```json
@@ -120,6 +135,70 @@ Response:
 {"type": "closed", "session_id": "<sid>"}
 ```
 
+### 3.5 import_cookies (issue #25)
+
+Request:
+```json
+{"type": "import_cookies",
+ "payload": {"session_id": "<sid>", "browser": "firefox", "profile": null}}
+```
+Response:
+```json
+{"type": "import_cookies",
+ "payload": {"session_id": "<sid>", "browser": "firefox", "imported": 3,
+             "skipped_app_bound": 0, "skipped_other": 1}}
+```
+- `browser`: `firefox` | `chrome` | `edge`; `profile` optional (Firefox dir name
+  or suffix; Chrome/Edge `Default`/`Profile N`).
+- Requires the `importCookies` capability. Source unreadable / Keychain refused
+  → `import_denied`.
+- `imported` counts cookies committed to the live session's cookie store; every
+  read-but-rejected cookie lands in a skip counter (§ read: no false success).
+- Chromium `v20` app-bound cookies are undecryptable by design → `skipped_app_bound`.
+- Per-browser fidelity + the workflow rules: `docs/cowork-managed-backend-contract.md` §5.
+
+### 3.6 stream_screenshots (issue #25)
+
+Request (subscribe; the frames are pushed on THIS connection):
+```json
+{"type": "stream_screenshots", "payload": {"session_id": "<sid>", "enabled": true}}
+```
+Ack (sent BEFORE the subscription starts):
+```json
+{"type": "stream_ack", "payload": {"session_id": "<sid>", "active": true}}
+```
+Pushed events (no request id):
+```json
+{"type": "screenshot_frame",
+ "payload": {"session_id": "<sid>", "seq": 1, "png": "<base64>",
+             "url": "https://…", "title": "…", "ts_ms": 1761000000000}}
+{"type": "stream_end", "payload": {"session_id": "<sid>", "reason": "session_closed"}}
+```
+- Requires `screenshot`. Published after each successful action + each page
+  `didFinish`; per-session min interval 200 ms with in-flight skip.
+- Ownership: admitted for the session's creating CONNECTION or, because this is
+  a read-only channel, the same PRINCIPAL (equal auth-token hash). Control ops
+  stay connection-scoped. Different token → `not_owner`.
+- `enabled: false` unsubscribes and acks `active: false`. Exactly one
+  `stream_end` per subscriber at session close / connection cancel.
+- A per-call-dial proxy cannot hold a subscription — direct UDS only.
+
+### 3.7 delete_profile (issue #25)
+
+Request:
+```json
+{"type": "delete_profile", "payload": {"profile_id": "run-abc"}}
+```
+Response:
+```json
+{"type": "profile_deleted", "payload": {"profile_id": "run-abc", "deleted": true}}
+```
+- Requires `persistentProfiles`; profile owner (same token hash) or system
+  caller only, else `profile_denied`.
+- Drops the registry entry and the on-disk `WKWebsiteDataStore` (immediately, or
+  at session close when a live session still holds it).
+- `deleted: false` = nothing to delete; not an error.
+
 ## 4. Node-Id Format
 
 Interactive node ids have **two representations** — callers MUST distinguish them:
@@ -149,9 +228,15 @@ Mechanism (`AXWalker.swift`): `var id="e"+(nextId++); window.__fbMap.set(id, new
 | evaluate | 1<<5 | 32 |
 | close | 1<<6 | 64 |
 | metrics (R-3/B-3) | 1<<7 | 128 |
+| importCookies (#25) | 1<<8 | 256 |
+| persistentProfiles (#25) | 1<<9 | 512 |
 
-- `default` caps = 95 (all except `evaluate` and `metrics`) — agent-studio tool token.
-- `all` caps = 255 — full capability token.
+- `default` caps = 95 (all except `evaluate`, `metrics`, `importCookies`,
+  `persistentProfiles`) — agent-studio tool token.
+- `all` caps = 1023 — full capability token.
+- `importCookies` gates `import_cookies`; `persistentProfiles` gates
+  `create_session.profile_id` + `delete_profile`. Both are OFF by default:
+  they touch the user's own browsers / persistent disk state.
 - `evaluate` is off by default; granting it requires the token's capability set AND origin whitelist (§7 of contract).
 - `metrics` (R-3/B-3) is off by default; without it the UDS `{type:"metrics"}` request and CDP `Performance.getMetrics` are cap-gated off (`.authDenied` / `evaluate_denied` at the method gate). Elevate via `tokenCapabilities: ["metrics"]` or `["all"]`. CDP `Performance.getMetrics` is Bearer-gated at the WS upgrade, not per-method.
 
@@ -173,6 +258,8 @@ Mechanism (`AXWalker.swift`): `var id="e"+(nextId++); window.__fbMap.set(id, new
 | `rate_limited` | true | H-8 per-client token bucket empty. Back off and retry. |
 | `timeout` | true | tiered watchdog (NFR-R) exceeded. Crash-rebuild attempted for idempotent actions. |
 | `replay_limit` | false | FR-13 rebuild-depth-cap exceeded (`guards.rebuildDepthCap`, default 1). |
+| `import_denied` | false | #25: cookie import refused — browser source unreadable or Keychain consent denied. |
+| `profile_denied` | false | #25: profile owned by another token, or caller has no token identity. |
 | `internal_error` | false | unexpected failure; check `Observability` logs with `trace_id`. |
 
 FR-13 repeat-action-break rejects 3+ consecutive identical action keys (admit key = `"\(action):\(target):\(payload)"`) — returns `internal_error` with a repeat-break message (not a dedicated code); distinct targets rotate cleanly.
@@ -223,7 +310,7 @@ semantics, not the old always-200 stub (M-14).
 ```json
 {"type": "metrics"}
 ```
-Response `{type:"metrics_ack", ...}` — real counters + latency quantiles (p50/p95).
+Response `{type:"metrics", ...}` — real counters + latency quantiles (p50/p95).
 Cap-gated: requires the `metrics` capability (§5). Without it the request answers
 `auth_denied`. CDP `Performance.getMetrics` mirrors the same counters, Bearer-gated
 at the WS upgrade.

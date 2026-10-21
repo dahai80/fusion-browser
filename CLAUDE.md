@@ -19,6 +19,32 @@ smoke, Phase 4 all verified via release binary + Python verify scripts
 (`scripts/verify_nonpersistent.py` / `perf_bench.py` / `uma_coexist.py` /
 `longrun_leak.py` / `metrics_smoke.py` → reports in `scripts/*-report.json`).
 Source lives in `Sources/FusionBrowser/`, tests in `Tests/FusionBrowserTests/`.
+Issue #25 added `CookieCrypto.swift`, `BrowserCookieImport.swift`,
+`StreamHub.swift`, `ProfileRegistry.swift` (plus `client/python/fusion_browser_client/`
+and `scripts/cowork_smoke.py`).
+
+**cowork managed-backend landed (issue #25, 2026-10-21)** — the engine backs a
+fusion-cowork managed browser panel end to end. Persistent per-run profiles
+(`create_session.profile_id` → `WKWebsiteDataStore(forIdentifier:)`, registry
+`~/.fusion-browser/profiles.json` owned by the auth-token hash, `delete_profile`
+purges the store), browser cookie import (`import_cookies` — Firefox
+`cookies.sqlite` plaintext; Chrome/Edge AES-128-CBC with the Keychain "Safe
+Storage" key, `v10`/`v11` decrypt, `v20` app-bound counted as skipped; honest
+`imported` = cookies actually committed), and a screenshot push stream
+(`stream_screenshots` on its own connection → `stream_ack` + `screenshot_frame`
+events + one `stream_end`; 200 ms throttle, in-flight skip). New caps
+`importCookies` (1<<8) + `persistentProfiles` (1<<9), both OUT of `.default`.
+Two live-path bugs found by the new harness and fixed: (a) every injected cookie
+became `Secure` because HTTPCookie treats a PRESENT `.secure` property key as
+true — an http:// page never received it (`FBWebView.cookieFromAttrs` now omits
+the key unless secure; `CookieInjectionTests`); (b) the panel stream returned
+`not_owner` because E-34 ownership is connection-scoped and the panel dials its
+own socket — `FBStreamAccess.allowsRead` also admits the same principal (equal
+token hash) for this READ-ONLY channel, while create/execute/close stay
+UUID-scoped (`StreamAccessTests`). Python client gained `import_cookies` /
+`delete_profile` / `profile_id` / `FusionBrowserStream`. Contract:
+`docs/cowork-managed-backend-contract.md`; live harness `scripts/cowork_smoke.py`
+(HARD gate). Build green, **294 tests** pass, Python client 14 pass.
 
 **Enterprise-commercial gap wave landed (2026-08-29)** — closes the 4 items the 0828
 product audit's enterprise tier flagged beyond the 6 blockers: H-9 multi-node capacity
@@ -85,7 +111,7 @@ landed scope, source map, and protocol shape in detail.
 ```bash
 cd /Users/dahai/fusion/fusion-browser
 swift build -c release     # binary -> .build/release/fusion-browser (pure Swift, no plugin)
-swift test --disable-sandbox   # 215 tests (--disable-sandbox no longer required:
+swift test --disable-sandbox   # 294 tests (--disable-sandbox no longer required:
                                #  plugin gone; kept for compatibility)
 swift test --disable-sandbox --filter CDPServerTests
 .build/release/fusion-browser
@@ -112,14 +138,13 @@ pytest tests/ -v   # fake UDS server, no live engine needed
 
 B-6/R-6 CI: `.github/workflows/release-gate.yml` gates PRs to main. Two jobs —
 `build-and-test` (GitHub-hosted `macos-15` arm64: `swift build -c release` +
-`swift test --disable-sandbox`, the 230 deterministic tests, no GUI needed) and
+`swift test --disable-sandbox`, the 294 deterministic tests, no GUI needed) and
 `live-path-gate` (self-hosted `[self-hosted, macos, arm64, gui]` runner with a
-GUI session: full `scripts/release_gate.sh` — 10 live hard harnesses incl
+GUI session: full `scripts/release_gate.sh` — 11 live hard harnesses incl
 `ownership_smoke.py` + `perf_multipage.py`, needs a CoreGraphics display + main
 run loop for WKWebView). `live-path-gate` needs fusion-mlx on `:11434` for
-`uma_coexist`; set repo var `SKIP_UMA=1` to drop only that harness (9 of 10 still
-run — the SKIP_UMA inline list includes `perf_multipage.py` and fails hard on a
-missing harness). Both jobs are required status checks (branch protection) — a
+`uma_coexist`; set repo var `SKIP_UMA=1` to drop only that harness (10 of 11 still
+run — a missing harness fails hard, never a silent skip). Both jobs are required status checks (branch protection) — a
 failure blocks merge. The live path is NOT covered by `swift test` (ARCH-3), so
 the self-hosted GUI job is the only CI regression gate for real WKWebView behavior.
 
@@ -156,7 +181,10 @@ self-heal, default OFF — sub-keys `enabled`/`sampleIntervalMs`/`thresholdMB`/
 `action` where action=`close_sessions`|`exit`; samples host RSS via
 `mach_task_basic_info.resident_size`, one-shot breach fires drain-all-sessions
 or exit-for-supervisor-restart), `guards` (FR-13 scheduling guards, default
-`maxActions=200`/`taskTimeoutMs=300000`/`repeatActionBreak=3`/`rebuildDepthCap=1`).
+`maxActions=200`/`taskTimeoutMs=300000`/`repeatActionBreak=3`/`rebuildDepthCap=1`),
+`cookieImport` (#25 browser cookie sources — sub-keys `chromeUserDataDir`/`edgeUserDataDir`/
+`firefoxProfilesDir`, each `decodeIfPresent` so a partial block overrides only what it sets;
+malformed JSON still fails loud).
 B-5/E-34: session ownership is AUTOMATIC. Every UDS connection mints a UUID owner id
 at init; `create` records it, `execute`/`close` verify it (`not_owner` on mismatch).
 System callers (nil owner) bypass. R-10 added the `tokenSystemCaller` config key (Bool,
