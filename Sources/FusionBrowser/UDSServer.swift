@@ -407,6 +407,10 @@ final class FBClientConnection {
             let counters = arr.filter { !isLatency($0.name) }
             let latency = arr.filter { isLatency($0.name) }
             send(resp: .metrics(MetricsResponse(counters: counters, latency: latency)))
+        case .importCookies, .streamScreenshots, .deleteProfile:
+            // Issue #25: real routes land in Task 7; compile bridge until then.
+            log.warn("Client", "route not implemented yet fd=\(fd)")
+            send(error: .invalidRequest)
         case .capacity:
             // H-9: per-node capacity report — the scheduler-placement input for an external
             // scheduler (fusion-gateway; cross-node scheduling/migration lands there per
