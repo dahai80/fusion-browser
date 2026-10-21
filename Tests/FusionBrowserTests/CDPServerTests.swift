@@ -491,6 +491,38 @@ final class CDPEvaluateRejectionTests: XCTestCase {
         XCTAssertEqual(typ, "object")
         XCTAssertEqual((val as? [String: Any])?["title"] as? String, "page")
     }
+
+    // C-1 (#13): caps are per-connection. Two translators on the SAME server must keep
+    // their own grants — an all-caps connection upgrading must not elevate a scoped one
+    // (the old server-level authedCaps/currentCaps pair was shared, so client B's
+    // upgrade overwrote client A's caps).
+    func testCapsIsolatedPerTranslator() {
+        let (server, _) = makeServer(allowedOrigins: [])
+        let scoped = FBCDPTranslator(server: server, allowedOrigins: [], caps: [])
+        let elevated = FBCDPTranslator(server: server, allowedOrigins: [], caps: .all)
+        XCTAssertEqual(scoped.grantedCaps, FBCapabilities(),
+                       "scoped connection must not inherit another connection's caps")
+        XCTAssertEqual(elevated.grantedCaps, .all)
+    }
+
+    // C-1 behavioral pin: a scoped translator's evaluate is cap-denied (empty caps hit
+    // the ActionDriver cap gate before any webview work, so it is deterministic under
+    // `swift test` — no watchdog, no JS eval). The all-caps positive path needs a live
+    // webview (ARCH-3) and is covered by the release-gate CDP harnesses.
+    func testScopedCapsEvaluateDenied() {
+        let (server, mgr) = makeServer(allowedOrigins: [])
+        let scoped = FBCDPTranslator(server: server, allowedOrigins: [], caps: [])
+        // An all-caps connection exists on the same server first — the leak trigger.
+        _ = FBCDPTranslator(server: server, allowedOrigins: [], caps: .all)
+        let resp = scoped.dispatch(method: "Runtime.evaluate",
+                                   params: ["expression": "1"], id: 11)
+        let r = resp.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        XCTAssertEqual(r["id"] as? Int, 11)
+        let err = r["error"] as? [String: Any]
+        XCTAssertEqual(err?["code"] as? Int, -32000)
+        XCTAssertEqual(err?["message"] as? String, "evaluate_denied")
+        if let sid = mgr.listIds().first { _ = mgr.close(sessionId: sid) }
+    }
 }
 
 // MARK: - Loopback: HTTP discovery + WS upgrade handshake + WS frame round-trip
