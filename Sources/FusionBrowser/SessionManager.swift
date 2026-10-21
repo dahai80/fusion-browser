@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 // FR-04 / FR-08: session lifecycle + resource quota enforcement.
 // FR-04: close() clears THIS session's nonPersistent dataStore, not global default.
@@ -34,6 +35,13 @@ public final class FBSession {
     // by any caller. A non-nil owner restricts execute/close to that same owner id; a
     // mismatched caller gets `not_owner` at the UDS route. Set once at create, immutable.
     public let ownerId: String?
+    // Issue #25: persistent profile identity. profileId is the caller's workflow-run
+    // label; profileStoreId is the registry's WKWebsiteDataStore UUID. Both nil for the
+    // default non-persistent path. storeDeletionPending marks a delete_profile that
+    // arrived while this session was still live — close() removes the store instead.
+    public let profileId: String?
+    public let profileStoreId: UUID?
+    public var storeDeletionPending: Bool = false
     // E-21: `webview` was a plain `private(set) var` read by ActionDriver/CDP on one
     // thread (client queue / global watchdog) and nil'd by close() on another (client
     // queue or memwatchdog queue) with zero synchronization -> Swift memory-model UB
@@ -81,7 +89,8 @@ public final class FBSession {
     public let extractor: FBAXTreeExtractor
 
     public init(id: String, mode: WebMode, guards: FBSchedulingGuards, credentialDomain: String?,
-                webview: FBWebView, ownerId: String? = nil) {
+                webview: FBWebView, ownerId: String? = nil, profileId: String? = nil,
+                profileStoreId: UUID? = nil) {
         self.id = id
         self.mode = mode
         self.createdAt = Date().timeIntervalSince1970
@@ -93,6 +102,8 @@ public final class FBSession {
         self.lastActivityTs = self.createdAt
         self.extractor = FBAXTreeExtractor()
         self.ownerId = ownerId
+        self.profileId = profileId
+        self.profileStoreId = profileStoreId
     }
 
     public func transition(to next: FBSessionState) {
@@ -164,10 +175,13 @@ public final class FBSessionManager {
     // collects idle ids, then closes each OUTSIDE the lock (close does a main-hop).
     private var reaperTimer: DispatchSourceTimer?
     private let reaperConfig: FBSessionReaperConfig
+    // Issue #25: persistent-profile registry (profileId -> data-store uuid + owner hash).
+    public let profiles: FBProfileRegistry
 
     public init(quota: FBResourceQuota, guards: FBSchedulingGuards, watchdog: FBWatchdogPolicy,
                 creds: FBCredentialManager, auth: FBAuth, allowedOrigins: [String],
-                sessionReaper: FBSessionReaperConfig = FBSessionReaperConfig()) {
+                sessionReaper: FBSessionReaperConfig = FBSessionReaperConfig(),
+                profiles: FBProfileRegistry = FBProfileRegistry()) {
         self.quota = quota
         self.guards = guards
         self.watchdog = watchdog
@@ -175,6 +189,7 @@ public final class FBSessionManager {
         self.auth = auth
         self.allowedOrigins = allowedOrigins
         self.reaperConfig = sessionReaper
+        self.profiles = profiles
     }
 
     // R-5: start the idle reaper. No-op if disabled. Idempotent (guard against double-start).
@@ -233,7 +248,28 @@ public final class FBSessionManager {
 
     // FR-08: enforce max sessions + total memory. Returns quota_exceeded if over cap.
     // T3.2: quota checked BEFORE WKWebView creation (don't burn main-thread alloc on reject).
-    public func create(req: CreateSessionRequest, traceId: String?, ownerId: String? = nil) -> FBResult<CreateSessionResponse> {
+    public func create(req: CreateSessionRequest, traceId: String?, ownerId: String? = nil,
+                       ownerKey: String? = nil) -> FBResult<CreateSessionResponse> {
+        // Issue #25: an explicit profileId opts into a persistent store. Resolve BEFORE
+        // burning main-thread webview work; a cross-owner or unattributable request is
+        // rejected here. nil profileId -> resolvedProfileStore stays nil (FR-04 path).
+        var resolvedProfileStore: UUID? = nil
+        if let pid = req.profileId, !pid.isEmpty {
+            guard let key = ownerKey else {
+                log.warn("SessionMgr", "profile create denied: no token owner identity")
+                return .failure(.profileDenied)
+            }
+            switch profiles.resolve(profileId: pid, ownerTokenHash: key) {
+            case .success(let storeIdStr):
+                guard let uuid = UUID(uuidString: storeIdStr) else {
+                    log.error("SessionMgr", "registry store id malformed for profileId=\(pid)")
+                    return .failure(.internalError)
+                }
+                resolvedProfileStore = uuid
+            case .failure(let e):
+                return .failure(e)
+            }
+        }
         // Pre-check quota under lock to avoid creating a WKWebView we'll immediately destroy.
         let admit: Bool = queue.sync {
             if sessions.count >= quota.maxSessions {
@@ -257,10 +293,10 @@ public final class FBSessionManager {
         var wvBox: FBWebView? = nil
         let sid = FBTrace.newId()
         if Thread.isMainThread {
-            wvBox = FBWebView(mode: req.mode, sessionId: sid)
+            wvBox = FBWebView(mode: req.mode, sessionId: sid, profileStoreId: resolvedProfileStore)
         } else {
             DispatchQueue.main.sync {
-                wvBox = FBWebView(mode: req.mode, sessionId: sid)
+                wvBox = FBWebView(mode: req.mode, sessionId: sid, profileStoreId: resolvedProfileStore)
             }
         }
         guard let wv = wvBox else { return .failure(.internalError) }
@@ -320,7 +356,8 @@ public final class FBSessionManager {
                 return .failure(.quotaExceeded)
             }
             let s = FBSession(id: sid, mode: req.mode, guards: guards,
-                              credentialDomain: req.credentialDomain, webview: wv, ownerId: ownerId)
+                              credentialDomain: req.credentialDomain, webview: wv, ownerId: ownerId,
+                              profileId: req.profileId, profileStoreId: resolvedProfileStore)
             s.injectedCookieAttrs = injectedAttrs
             s.scheduler.reset()
             s.transition(to: .running)
@@ -454,6 +491,19 @@ public final class FBSessionManager {
         }
         if logout, let wv = s.webview { wv.clearCookies() }
         s.close()
+        // Issue #25: a delete_profile that arrived while this session was live (or a
+        // profile already gone from the registry) frees its WebKit store on the LAST
+        // session's close. A plain close KEEPS the store — that is the point of profiles.
+        if let pid = s.profileId, let uuid = s.profileStoreId {
+            let othersLive = queue.sync { sessions.values.contains { $0.profileStoreId == uuid } }
+            let profileGone = profiles.entry(profileId: pid) == nil || s.storeDeletionPending
+            if profileGone && !othersLive {
+                DispatchQueue.main.async {
+                    WKWebsiteDataStore.remove(forIdentifier: uuid) { _ in }
+                }
+                log.info("SessionMgr", "profile store removed profileId=\(pid) store=\(uuid)")
+            }
+        }
         log.info("SessionMgr", "closed \(sid) logout=\(logout)")
         return nil
     }
