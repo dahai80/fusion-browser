@@ -8,10 +8,12 @@ Wire = length-prefixed JSON ([u32 BE len][JSON], snake_case keys). Auth handshak
 REQUIRED first frame ({type:"auth",token}) -> auth_ack, else auth_denied.
 """
 
-from .client import FusionBrowserClient, FBError, BBox, AXTreeNode, SessionInfo, CapacityInfo
+from .client import (FusionBrowserClient, FusionBrowserStream, FBError, BBox, AXTreeNode,
+                     SessionInfo, CapacityInfo)
 
 __all__ = [
     "FusionBrowserClient",
+    "FusionBrowserStream",
     "FBError",
     "BBox",
     "AXTreeNode",

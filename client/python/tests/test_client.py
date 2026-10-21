@@ -15,7 +15,8 @@ import time
 
 import pytest
 
-from fusion_browser_client import FusionBrowserClient, FBError, BBox, AXTreeNode, CapacityInfo
+from fusion_browser_client import (FusionBrowserClient, FusionBrowserStream, FBError, BBox,
+                                   AXTreeNode, CapacityInfo)
 
 
 def _send(sock, obj):
@@ -85,7 +86,8 @@ class FakeServer:
                 resp = self._respond(msg)
                 if resp is None:
                     break
-                _send(conn, resp)
+                for frame in (resp if isinstance(resp, list) else [resp]):
+                    _send(conn, frame)
         except OSError:
             pass
         finally:
@@ -118,6 +120,25 @@ class FakeServer:
             return {"type": "capacity", "payload": {
                 "node_id": "UUID", "max_sessions": 16, "live_sessions": 1,
                 "max_total_memory_mb": 2400, "free_memory_mb": 90000, "ram_gb": 128}}
+        if t == "import_cookies":
+            p = msg.get("payload", {})
+            return {"type": "import_cookies", "payload": {
+                "session_id": p.get("session_id"), "browser": p.get("browser"),
+                "imported": 3, "skipped_app_bound": 1, "skipped_other": 0}}
+        if t == "delete_profile":
+            return {"type": "profile_deleted", "payload": {
+                "profile_id": msg.get("payload", {}).get("profile_id"), "deleted": True}}
+        if t == "stream_screenshots":
+            if not msg.get("payload", {}).get("enabled"):
+                return {"type": "stream_ack", "payload": {"session_id": "s1", "active": False}}
+            # Issue #25: ack first, then one frame + the terminal stream_end event.
+            return [
+                {"type": "stream_ack", "payload": {"session_id": "s1", "active": True}},
+                {"type": "screenshot_frame", "session_id": "s1", "seq": 1,
+                 "png": base64.b64encode(b"PNGDATA").decode(),
+                 "url": "https://x", "title": "T", "ts_ms": 1700000000000},
+                {"type": "stream_end", "session_id": "s1", "reason": "session_closed"},
+            ]
         return {"type": "error", "payload": {"code": "unknown", "message": "unhandled", "retryable": False}}
 
 
@@ -216,3 +237,57 @@ def test_axtreenode_from_dict_minimal():
     n = AXTreeNode.from_dict({"nodeId": "e9", "role": "button"})
     assert n.nodeId == "e9"
     assert n.bbox is None
+
+
+# -- Issue #25: profiles, cookie import, screenshot stream -------------------
+
+
+def test_create_session_passes_profile_id(fake_server):
+    srv, path = fake_server
+    with FusionBrowserClient(socket_path=path, token="test-token") as c:
+        c.create_session(profile_id="workflow-run-42")
+    create = [r for r in srv.requests if r["type"] == "create_session"][0]
+    assert create["payload"]["profile_id"] == "workflow-run-42"
+
+
+def test_create_session_without_profile_omits_key(fake_server):
+    srv, path = fake_server
+    with FusionBrowserClient(socket_path=path, token="test-token") as c:
+        c.create_session()
+    create = [r for r in srv.requests if r["type"] == "create_session"][0]
+    assert "profile_id" not in create["payload"]
+
+
+def test_import_cookies_returns_payload(fake_server):
+    srv, path = fake_server
+    with FusionBrowserClient(socket_path=path, token="test-token") as c:
+        res = c.import_cookies("s1", "chrome", profile="Default")
+    assert res["imported"] == 3
+    assert res["skipped_app_bound"] == 1
+    req = [r for r in srv.requests if r["type"] == "import_cookies"][0]
+    assert req["payload"] == {"session_id": "s1", "browser": "chrome", "profile": "Default"}
+
+
+def test_delete_profile_returns_bool(fake_server):
+    srv, path = fake_server
+    with FusionBrowserClient(socket_path=path, token="test-token") as c:
+        assert c.delete_profile("workflow-run-42") is True
+    req = [r for r in srv.requests if r["type"] == "delete_profile"][0]
+    assert req["payload"]["profile_id"] == "workflow-run-42"
+
+
+def test_stream_yields_frame_then_stops_on_stream_end(fake_server):
+    srv, path = fake_server
+    stream = FusionBrowserStream("s1", socket_path=path, token="test-token")
+    try:
+        frames = list(stream.frames())
+    finally:
+        stream.close()
+    assert len(frames) == 1
+    assert frames[0]["type"] == "screenshot_frame"
+    assert frames[0]["seq"] == 1
+    assert frames[0]["url"] == "https://x"
+    assert base64.b64decode(frames[0]["png"]) == b"PNGDATA"
+    types = [r["type"] for r in srv.requests]
+    assert types[0] == "auth"
+    assert "stream_screenshots" in types
