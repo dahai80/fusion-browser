@@ -8,6 +8,21 @@ import Foundation
 // Registry file is owner-only (0o600), atomically written, and a corrupt file reads as
 // empty (fail-safe rebuild) rather than throwing the engine into a bad state.
 
+// Issue #25: pure admission gate for profileId creates (unit-testable; live create is
+// webview-bound and cannot run under swift test per ARCH-3). Fail-closed:
+// - no profileId -> unchanged non-persistent path, ungated;
+// - profileId without .persistentProfiles -> auth_denied;
+// - profileId without a token identity (system caller/CDP) -> profile_denied (no owner
+//   means the profile could never be attributed or deleted safely).
+public enum FBProfileGate {
+    public static func check(profileId: String?, caps: FBCapabilities, ownerKey: String?) -> FBError? {
+        guard let id = profileId, !id.isEmpty else { return nil }
+        guard caps.contains(.persistentProfiles) else { return .authDenied }
+        guard ownerKey != nil else { return .profileDenied }
+        return nil
+    }
+}
+
 public final class FBProfileRegistry {
     public struct Entry: Codable, Equatable {
         public var storeId: String

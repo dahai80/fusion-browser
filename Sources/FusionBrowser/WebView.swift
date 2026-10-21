@@ -60,17 +60,28 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         respLock.lock(); _lastResponse = r; respLock.unlock()
     }
 
-    public init(mode: WebMode, sessionId: String) {
+    // Issue #25: profileStoreId non-nil selects a persistent WKWebsiteDataStore keyed by
+    // the registry's UUID (login state survives session close AND engine restart). nil
+    // keeps FR-04's in-memory nonPersistent store, byte-identical to before.
+    public init(mode: WebMode, sessionId: String, profileStoreId: UUID? = nil) {
         self.mode = mode
         self.sessionId = sessionId
+        self.profileStoreId = profileStoreId
         super.init()
         setupWebView()
     }
 
+    private let profileStoreId: UUID?
+
     private func setupWebView() {
         let config = WKWebViewConfiguration()
         // FR-04: in-memory session, nonPersistent dataStore per session.
-        config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        // Issue #25: an explicit profileId opts into a persistent store (macOS 14+).
+        if let pid = profileStoreId {
+            config.websiteDataStore = WKWebsiteDataStore(forIdentifier: pid)
+        } else {
+            config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        }
         // FR-08: no explicit processPool — WKProcessPool is deprecated (macOS 12+, no-op).
         // WebKit manages WebContent processes internally with per-site isolation; the
         // live process count is bounded by the session cap (FBResourceQuota.maxSessions).

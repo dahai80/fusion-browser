@@ -182,6 +182,9 @@ final class FBClientConnection {
     // R-10: set true on auth success when the token is the operator-designated system-caller
     // token. Drives effectiveOwner (nil → SessionManager bypass).
     private var isSystemCaller = false
+    // Issue #25: durable owner identity for persistent profiles (auth-token SHA256 hex).
+    // nil when the token has no identity (no token configured) — profile creates fail closed.
+    private var connectionOwnerKey: String?
     // B-5/E-35: per-client in-flight batch cap. onReadable bounds the frames processed per
     // read so a 64KB recv (~2000 small frames) cannot queue 2000 blocking driver.execute on
     // main in one shot. Excess complete frames are buffered here and drained on subsequent
@@ -331,6 +334,7 @@ final class FBClientConnection {
                 // R-10: detect a system-caller token so the route passes nil ownerId and
                 // SessionManager bypasses E-34 ownership (per-call-dial proxy case).
                 self.isSystemCaller = auth.isSystemCaller(token: authMsg.token)
+                self.connectionOwnerKey = auth.ownerKey(token: authMsg.token)
                 log.info("Client", "auth ok caps=\(c.rawValue) systemCaller=\(isSystemCaller)")
                 sendAuthed()
                 return
@@ -363,7 +367,16 @@ final class FBClientConnection {
                 send(error: .rateLimited)
                 return
             }
-            switch manager.create(req: r, traceId: req.traceId, ownerId: effectiveOwner) {
+            // Issue #25: profileId admission (cap + token attribution). Fail-closed:
+            // a system caller has no token identity, so it cannot own a profile.
+            if let gateErr = FBProfileGate.check(profileId: r.profileId, caps: caps,
+                                                 ownerKey: connectionOwnerKey) {
+                log.warn("Client", "create profile gate denied code=\(gateErr.code) fd=\(fd)")
+                send(error: gateErr)
+                return
+            }
+            switch manager.create(req: r, traceId: req.traceId, ownerId: effectiveOwner,
+                                  ownerKey: connectionOwnerKey) {
             case .success(let cr): send(resp: .createSession(cr))
             case .failure(let e): send(error: e)
             }
