@@ -177,11 +177,16 @@ public final class FBSessionManager {
     private let reaperConfig: FBSessionReaperConfig
     // Issue #25: persistent-profile registry (profileId -> data-store uuid + owner hash).
     public let profiles: FBProfileRegistry
+    // Issue #25: screenshot stream hub (nil = streaming disabled, e.g. unit tests).
+    // The manager only signals session end + attaches it to each new webview; the UDS
+    // route owns subscribe/unsubscribe and the driver owns per-action publishes.
+    public let streamHub: FBStreamHub?
 
     public init(quota: FBResourceQuota, guards: FBSchedulingGuards, watchdog: FBWatchdogPolicy,
                 creds: FBCredentialManager, auth: FBAuth, allowedOrigins: [String],
                 sessionReaper: FBSessionReaperConfig = FBSessionReaperConfig(),
-                profiles: FBProfileRegistry = FBProfileRegistry()) {
+                profiles: FBProfileRegistry = FBProfileRegistry(),
+                streamHub: FBStreamHub? = nil) {
         self.quota = quota
         self.guards = guards
         self.watchdog = watchdog
@@ -190,6 +195,7 @@ public final class FBSessionManager {
         self.allowedOrigins = allowedOrigins
         self.reaperConfig = sessionReaper
         self.profiles = profiles
+        self.streamHub = streamHub
     }
 
     // R-5: start the idle reaper. No-op if disabled. Idempotent (guard against double-start).
@@ -300,6 +306,9 @@ public final class FBSessionManager {
             }
         }
         guard let wv = wvBox else { return .failure(.internalError) }
+        // Issue #25: attach the stream hub so didFinish can push a frame to subscribed
+        // panels. Weak on the webview side; the engine owns the hub for the process life.
+        wv.streamHub = streamHub
         // E-36: credential retrieval (Keychain IPC) + cookie injection (httpCookieStore) MUST
         // run OUTSIDE the sessionmgr queue lock. The old code did both inside queue.sync; the
         // cookie store's setCookie completion can touch main, and Keychain IPC can block —
@@ -491,6 +500,9 @@ public final class FBSessionManager {
         }
         if logout, let wv = s.webview { wv.clearCookies() }
         s.close()
+        // Issue #25: terminal stream signal — subscribers get exactly one stream_end and
+        // the hub drops the session's subscriptions (no frames after this point).
+        streamHub?.end(sessionId: sid, reason: "session_closed")
         // Issue #25: a delete_profile that arrived while this session was live (or a
         // profile already gone from the registry) frees its WebKit store on the LAST
         // session's close. A plain close KEEPS the store — that is the point of profiles.
@@ -521,6 +533,18 @@ public final class FBSessionManager {
     }
 
     public func listIds() -> [String] { return queue.sync { Array(sessions.keys) } }
+
+    // Issue #25: delete_profile arrived while sessions still hold the profile's store.
+    // Mark them so each session's close frees the store even if the profileId is
+    // re-created (with a NEW store UUID) before the old session closes.
+    public func markProfileDeleted(profileId: String) {
+        let marked = queue.sync { () -> Int in
+            let live = sessions.values.filter { $0.profileId == profileId }
+            live.forEach { $0.storeDeletionPending = true }
+            return live.count
+        }
+        log.info("SessionMgr", "profile delete marked live=\(marked) profileId=\(profileId)")
+    }
 
     // T2.3: CDP shim maps its single synthetic target to the first live session.
     // L-15: prefer the STABLE pinned firstSessionId (set on first create, cleared on that

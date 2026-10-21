@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Security
 
 // Issue #25: read cookies out of the user's own browsers so a cowork run can start
 // already logged in. Chrome/Edge keep the value AES-encrypted (see CookieCrypto.swift)
@@ -7,6 +8,36 @@ import SQLite3
 // Every browser holds its DB open, so the file is copied to a temp dir together with
 // its -wal/-shm sidecars before reading (an uncheckpointed WAL holds recent rows).
 // E-39: cookie names and values are NEVER logged — counts and error codes only.
+
+// Issue #25: macOS Keychain lookup for the browser's cookie master password. Chrome and
+// Edge each store a random password under a "Safe Storage" generic-password item; the
+// first read after boot may show a system consent prompt (the item's ACL names the
+// browser). A missing item (locked keychain / browser never launched / consent denied)
+// returns nil so the caller imports only plaintext rows and reports the rest as skipped.
+// E-39: the password bytes are never logged.
+public enum FBBrowserKeychain {
+    public static func safeStoragePassword(kind: FBBrowserKind) -> Data? {
+        let service: String
+        switch kind {
+        case .chrome: service = "Chrome Safe Storage"
+        case .edge: service = "Microsoft Edge Safe Storage"
+        case .firefox: return nil
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else {
+            FBLogger.shared.warn("CookieImport", "safe storage key unavailable service=\(service) status=\(status)")
+            return nil
+        }
+        return data
+    }
+}
 
 public enum FBBrowserKind: String, Codable {
     case chrome
