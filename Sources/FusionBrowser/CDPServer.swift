@@ -105,8 +105,8 @@ public final class FBCDPServer {
     // capabilities. Fail-closed — no token configured denies all (PRD FR-10/NFR-S3: CDP
     // entry must be authed). The old form returned a bare Bool and DISCARDED the caps, so
     // CDP auth degraded to binary valid/invalid with no per-method enforcement — any valid
-    // token drove the full CDP surface (navigate/click/type/evaluate/screenshot). Now the
-    // caller (WS upgrade) stores the caps on the server; executeAction threads them to the
+    // token drove the full CDP surface (navigate/click/type/evaluate/screenshot). The caller
+    // (WS upgrade) keeps the caps on ITS connection; executeAction threads them to the
     // driver so a scoped token is enforced at every CDP method, not just EVALUATE.
     fileprivate func verifyBearer(_ token: String?) -> FBCapabilities? {
         return auth.authenticate(token: token)
@@ -194,10 +194,6 @@ final class FBCDPConnection {
     // and event-frame synthesis so it is unit-testable without a live socket or WKWebView
     // (live webview cannot run under `swift test` — evaluateJSSync deadlocks).
     private var emitter: FBCDPEventEmitter!
-    // H-5/C-1 (1016 audit): caps granted at THIS connection's WS upgrade, threaded to
-    // executeAction per call. Server-level state was cross-connection (client B's
-    // upgrade overwrote client A's caps).
-    fileprivate var authedCaps: FBCapabilities = []
     // E-8: ONE persistent translator per connection. The translator owns the DOM
     // identity registry (intToIdStr / objectIdToIdStr / idStrToSelector); a fresh
     // translator per message would wipe the registry between getFullAXTree and the
@@ -300,8 +296,8 @@ final class FBCDPConnection {
                 }
             }
             if let s = server?.ensureSession(), !url.isEmpty {
-                // C-1: thread the HTTP request's own caps (captured above) — per-connection
-                // authedCaps is not set for plain-HTTP requests.
+                // C-1: thread the HTTP request's own caps (captured above) — a plain-HTTP
+                // request has no connection-level caps, only its Bearer grant.
                 _ = server?.executeAction(BrowserActionRequest(sessionId: s.id, action: .navigate, payloadText: url, traceId: "cdp-new"),
                                           caps: httpCaps ?? [])
             }
@@ -393,13 +389,14 @@ final class FBCDPConnection {
         }
         // F-2/H-5: WS upgrade must also pass Bearer auth (fail-closed). A browser can open a
         // raw WS without an Authorization header, so this gate blocks cross-origin browser
-        // CSRF even when the page origin itself is allowlisted. The granted caps are stored on
-        // the server so executeAction enforces them per CDP method.
+        // CSRF even when the page origin itself is allowlisted. The granted caps stay on
+        // THIS connection (threaded to its translator + every executeAction call) — C-1
+        // (#13): server-level storage leaked caps across connections.
         guard let caps = checkBearerAuth(header) else {
             writeHTTP(status: "403 Forbidden", body: "bearer required"); close(); return
         }
-        self.authedCaps = caps
-        log.info("CDP", "connection caps set raw=\(caps.rawValue) fd=\(fd)")        // E-15/F-3: reject cross-origin WebSocket upgrades, fail-closed on empty Origin.
+        log.info("CDP", "connection caps set raw=\(caps.rawValue) fd=\(fd)")
+        // E-15/F-3: reject cross-origin WebSocket upgrades, fail-closed on empty Origin.
         // Browsers permit `new WebSocket()` across origins; without an Origin check any
         // visited webpage can drive the engine. The old code let an EMPTY Origin bypass
         // the check (commented "non-browser client like cowork is allowed"), which gave a
@@ -889,6 +886,9 @@ final class FBCDPTranslator {
     // through every executeAction. Per-connection (was per-server — cross-connection
     // elevation). A scoped token stays scoped no matter who else connects.
     private let caps: FBCapabilities
+    // Test seam: pin C-1 (#13) isolation — each translator keeps its own grant even
+    // after other connections upgrade on the same server.
+    internal var grantedCaps: FBCapabilities { caps }
     // A-8 (1016 audit): the id of the session this connection's actions actually landed
     // on, recorded by runAction from each executeAction response. Event push paths use
     // it (not ensureSession — which can resolve a DIFFERENT, UDS-created session when
@@ -1003,7 +1003,7 @@ final class FBCDPTranslator {
         // even with no live server (cowork uses the root nodeId only as the querySelector
         // scope). With a live server, populate childNodeCount + register observed eN ids.
         var childCount = 0
-        if let server = server, let s = server.ensureSession(), !s.isClosing, let wv = s.webview {
+        if let server = server, let s = server.ensureSession(), !s.isClosing, s.webview != nil {
             let (res, _, _, _) = server.extractAXTree()
             childCount = res?.nodes.count ?? 0
             // Register every eN we just observed so a later resolveNode(backendNodeId=N)
