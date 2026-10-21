@@ -23,15 +23,20 @@ public final class FBActionDriver {
     private let sanitizer: FBSanitizer
     // T3.4: optional visual-grounding fallback for when DOM/stable mapping can't resolve a node.
     private let visualLocator: FBVisualLocator?
+    // Issue #25: screenshot stream hub. Publish after a successful action so a subscribed
+    // side panel sees the result of the step, not just the navigation. nil = streaming off.
+    private let streamHub: FBStreamHub?
     private let log = FBLogger.shared
 
     public init(watchdog: FBWatchdogPolicy, auth: FBAuth, allowedOrigins: [String],
-                sanitizer: FBSanitizer, visualLocator: FBVisualLocator? = nil) {
+                sanitizer: FBSanitizer, visualLocator: FBVisualLocator? = nil,
+                streamHub: FBStreamHub? = nil) {
         self.watchdog = watchdog
         self.auth = auth
         self.allowedOrigins = allowedOrigins
         self.sanitizer = sanitizer
         self.visualLocator = visualLocator
+        self.streamHub = streamHub
     }
 
     // Execute one action against a session. Returns state response (error set on failure).
@@ -383,6 +388,9 @@ public final class FBActionDriver {
             return errorResp(session: session, req: req, traceId: traceId, err: e, startTs: startTs)
         }
         let nodes = res?.nodes.map { FBAXTreeReducer.toWireNode($0) } ?? []
+        // Issue #25: push a frame after the action completed (cheap no-op when nobody
+        // subscribed; the hub throttles + skips in-flight captures).
+        streamHub?.publish(sessionId: sid, webview: wv)
         return BrowserStateResponse(sessionId: sid, url: res?.url ?? wv.currentUrl(),
                                     title: res?.title ?? wv.currentTitle(),
                                     axTreeMarkdown: md, interactiveNodes: nodes,

@@ -343,6 +343,10 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     public func currentUrl() -> String { return webView?.url?.absoluteString ?? "" }
     public func currentTitle() -> String { return webView?.title ?? "" }
+    // Issue #25: stream hub hook. Set by SessionManager at create; publish fires after a
+    // navigation completes (didFinish) so the panel shows the loaded page. Weak: the hub
+    // is owned by the engine wiring, not by a session.
+    public weak var streamHub: FBStreamHub?
 
     // JS eval with completion (async path).
     public func evaluateJS(_ script: String, completion: @escaping (Any?, Error?) -> Void) {
@@ -501,6 +505,10 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         log.info("WebView", "didFinish \(webView.url?.absoluteString ?? "") sess=\(sessionId)")
         resolvePendingNav(navigation)
+        // Issue #25: a completed navigation is exactly when the side panel wants a fresh
+        // frame. publish is cheap when nobody subscribed (immediate return) and the hub's
+        // throttle/in-flight guards keep a nav storm from queueing snapshots.
+        streamHub?.publish(sessionId: sessionId, webview: self)
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -551,5 +559,20 @@ public final class FBWebView: NSObject, WKNavigationDelegate, WKUIDelegate {
         // Block popups/new windows.
         log.warn("WebView", "blocked popup/new-window sess=\(sessionId)")
         return nil
+    }
+}
+
+// Issue #25: stream capture seam. The hub calls this from the driver queue or main
+// (didFinish); screenshotSync blocks on a semaphore while takeSnapshot dispatches to
+// main, so it MUST run off-main — hop to a global queue and never capture on main.
+extension FBWebView: FBStreamCapturable {
+    public func screenshotPngAsync(_ completion: @escaping (Data?) -> Void) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            completion(self?.screenshotSync())
+        }
+    }
+
+    public func currentPageInfo() -> (url: String, title: String) {
+        return (currentUrl(), currentTitle())
     }
 }

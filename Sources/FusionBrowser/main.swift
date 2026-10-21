@@ -101,17 +101,21 @@ func runEngine() {
     let watchdog = cfg.watchdog.policy()
     // H-1: no shared extractor — each FBSession owns its own FBAXTreeExtractor (per-session
     // mapping isolation). E-17~20 (#68): pure-Swift extractor (Rust core removed).
+    // Issue #25: one stream hub for the process. Sessions attach it (didFinish publish),
+    // the driver publishes after each action, and the UDS route owns subscriptions.
+    let streamHub = FBStreamHub()
     let manager = FBSessionManager(quota: cfg.quota, guards: cfg.guards, watchdog: watchdog,
                                     creds: creds, auth: auth, allowedOrigins: cfg.allowedOrigins,
-                                    sessionReaper: cfg.sessionReaper)
+                                    sessionReaper: cfg.sessionReaper, streamHub: streamHub)
     let visualLocator = FBVisualLocator(config: cfg.visualLocator)
     if cfg.visualLocator.enabled {
         log.info("Main", "visual locator on model=\(cfg.visualLocator.model) endpoint=\(cfg.visualLocator.endpoint)")
     }
     let driver = FBActionDriver(watchdog: watchdog, auth: auth, allowedOrigins: cfg.allowedOrigins,
-                                sanitizer: sanitizer, visualLocator: visualLocator)
+                                sanitizer: sanitizer, visualLocator: visualLocator,
+                                streamHub: streamHub)
     let server = FBUDSServer(socketPath: cfg.socketPath, manager: manager, driver: driver,
-                             auth: auth, rateLimit: cfg.rateLimit)
+                             auth: auth, rateLimit: cfg.rateLimit, streamHub: streamHub)
     if cfg.rateLimit.enabled {
         log.info("Main", "rate limit on rate=\(cfg.rateLimit.ratePerSec)/s burst=\(cfg.rateLimit.burst)")
     } else {

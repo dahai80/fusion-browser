@@ -10,6 +10,8 @@ public final class FBUDSServer {
     private let driver: FBActionDriver
     private let auth: FBAuth
     private let rateLimitConfig: FBRateLimitConfig
+    // Issue #25: screenshot stream hub shared by every connection (nil = streaming off).
+    private let streamHub: FBStreamHub?
     private var listenFd: Int32 = -1
     // C-4 (1016 audit): listenFd is written by stop() (cancel handler on the source queue)
     // and read by acceptOnce() (same source queue — but the cancel handler + a concurrent
@@ -25,12 +27,14 @@ public final class FBUDSServer {
     private let clientsLock = NSLock()
 
     public init(socketPath: String, manager: FBSessionManager, driver: FBActionDriver,
-                auth: FBAuth, rateLimit: FBRateLimitConfig = FBRateLimitConfig()) {
+                auth: FBAuth, rateLimit: FBRateLimitConfig = FBRateLimitConfig(),
+                streamHub: FBStreamHub? = nil) {
         self.socketPath = socketPath
         self.manager = manager
         self.driver = driver
         self.auth = auth
         self.rateLimitConfig = rateLimit
+        self.streamHub = streamHub
     }
 
     public func start() throws {
@@ -99,7 +103,7 @@ public final class FBUDSServer {
         _ = fcntl(clientFd, F_SETFL, flags | O_NONBLOCK)
         log.info("UDSServer", "connection accepted fd=\(clientFd)")
         let client = FBClientConnection(fd: clientFd, manager: manager, driver: driver, auth: auth,
-                                         rateLimitConfig: rateLimitConfig) { [weak self] in
+                                         rateLimitConfig: rateLimitConfig, streamHub: streamHub) { [weak self] in
             // onDone: remove from retain set
             self?.releaseClient(ObjectIdentifier($0))
         }
@@ -154,7 +158,15 @@ final class FBClientConnection {
     private let manager: FBSessionManager
     private let driver: FBActionDriver
     private let auth: FBAuth
+    // Issue #25: stream hub (frame pushes from the capture thread) + browser cookie keys
+    // cached per connection (one Keychain consent prompt per browser, not per import).
+    private let streamHub: FBStreamHub?
+    private var cookieKeys: [FBBrowserKind: Data] = [:]
     private let reader = FBFrameReader()
+    // Issue #25: serializes socket writes. Stream frames are written from the hub's
+    // capture completion thread while responses are written from this client's queue —
+    // two concurrent writeAll calls would interleave halves of two frames on the wire.
+    private let writeLock = NSLock()
     // H-8: .userInitiated QoS so a client's execute requests are not deprioritized
     // behind background work on the shared dispatch pool (fair scheduling to the
     // main-thread webview path). The serial label still isolates one client's frames.
@@ -193,12 +205,13 @@ final class FBClientConnection {
     private let maxBatch: Int
 
     init(fd: Int32, manager: FBSessionManager, driver: FBActionDriver, auth: FBAuth,
-         rateLimitConfig: FBRateLimitConfig,
+         rateLimitConfig: FBRateLimitConfig, streamHub: FBStreamHub? = nil,
          onDone: @escaping (FBClientConnection) -> Void) {
         self.fd = fd
         self.manager = manager
         self.driver = driver
         self.auth = auth
+        self.streamHub = streamHub
         self.onDone = onDone
         if rateLimitConfig.enabled {
             self.rateLimiter = FBRateLimiter(ratePerSec: rateLimitConfig.ratePerSec,
@@ -244,6 +257,10 @@ final class FBClientConnection {
             // C-6: stop the partial-frame watchdog with the connection.
             self.partialTimer?.cancel()
             self.partialTimer = nil
+            // Issue #25: a disconnected stream subscriber must not leak — drop every
+            // subscription this connection held (frames would otherwise write to a
+            // closed fd until the next close/reaper).
+            self.streamHub?.unsubscribeAll(key: self.ownerId)
             self.log.info("Client", "disconnected fd=\(self.fd)")
             self.onDone(self)
         }
@@ -420,10 +437,82 @@ final class FBClientConnection {
             let counters = arr.filter { !isLatency($0.name) }
             let latency = arr.filter { isLatency($0.name) }
             send(resp: .metrics(MetricsResponse(counters: counters, latency: latency)))
-        case .importCookies, .streamScreenshots, .deleteProfile:
-            // Issue #25: real routes land in Task 7; compile bridge until then.
-            log.warn("Client", "route not implemented yet fd=\(fd)")
-            send(error: .invalidRequest)
+        case .importCookies(let r):
+            // Issue #25: cookie import touches the user's Keychain + browser profiles, so
+            // it needs its OWN capability (.importCookies, NOT in .default).
+            guard caps.contains(.importCookies) else { send(error: .authDenied); return }
+            guard let kind = FBBrowserKind(rawValue: r.browser.lowercased()) else {
+                log.warn("Client", "import_cookies unknown browser fd=\(fd)")
+                send(error: .invalidRequest)
+                return
+            }
+            switch manager.get(r.sessionId, ownerId: effectiveOwner) {
+            case .failure(let e):
+                send(error: e)
+            case .success(let session):
+                guard let wv = session.webview else { send(error: .sessionClosing); return }
+                let importer = FBBrowserCookieImporter(config: FBCookieImportConfig.default) { [weak self] kind in
+                    self?.cookieKey(kind)
+                }
+                guard case .success(let imported) = importer.importCookies(kind: kind, profile: r.profile) else {
+                    send(error: .importDenied)
+                    return
+                }
+                var injected = 0
+                for cookie in imported.cookies {
+                    let domain = cookie.attrs["domain"] ?? ""
+                    if wv.injectCookies(cookie.attrs, domain: domain) { injected += 1 }
+                }
+                // Cookies read but rejected by WKWebView count as skipped, never as
+                // imported — the response reports what the session actually holds.
+                let failedInject = imported.cookies.count - injected
+                log.info("Client", "import_cookies browser=\(kind.rawValue) read=\(imported.cookies.count) injected=\(injected) appBound=\(imported.skippedAppBound) other=\(imported.skippedOther + failedInject) sess=\(r.sessionId)")
+                send(resp: .importCookies(ImportCookiesResponse(
+                    sessionId: r.sessionId, browser: kind.rawValue, imported: injected,
+                    skippedAppBound: imported.skippedAppBound,
+                    skippedOther: imported.skippedOther + failedInject)))
+            }
+        case .streamScreenshots(let r):
+            // Push needs .screenshot (same data class as the pull path) + an owner match.
+            guard caps.contains(.screenshot) else { send(error: .authDenied); return }
+            guard let hub = streamHub else { send(error: .invalidRequest); return }
+            switch manager.get(r.sessionId, ownerId: effectiveOwner) {
+            case .failure(let e):
+                send(error: e)
+            case .success(let session):
+                guard let wv = session.webview else { send(error: .sessionClosing); return }
+                if r.enabled {
+                    // Ack BEFORE subscribing so the caller's first read is the ack (a
+                    // capture-triggered frame can otherwise win the race on the socket).
+                    send(resp: .streamAck(StreamAckResponse(sessionId: r.sessionId, active: true)))
+                    let listeners = hub.subscribe(sessionId: r.sessionId, key: ownerId) { [weak self] data in
+                        self?.writeAll(data)
+                    }
+                    log.info("Client", "stream_screenshots on sess=\(r.sessionId) listeners=\(listeners) fd=\(fd)")
+                    // Immediate first frame so the panel is not blank until the next action.
+                    hub.publish(sessionId: r.sessionId, webview: wv)
+                } else {
+                    hub.unsubscribe(sessionId: r.sessionId, key: ownerId)
+                    log.info("Client", "stream_screenshots off sess=\(r.sessionId) fd=\(fd)")
+                    send(resp: .streamAck(StreamAckResponse(sessionId: r.sessionId, active: false)))
+                }
+            }
+        case .deleteProfile(let r):
+            // Issue #25: a profile is login state — deleting another token's profile is
+            // denied (profile_denied / not_owner). System callers may delete any profile.
+            guard caps.contains(.persistentProfiles) else { send(error: .authDenied); return }
+            guard isSystemCaller || connectionOwnerKey != nil else { send(error: .profileDenied); return }
+            let existed = manager.profiles.entry(profileId: r.profileId) != nil
+            if let err = manager.profiles.delete(profileId: r.profileId,
+                                                 ownerTokenHash: connectionOwnerKey ?? "",
+                                                 isSystemCaller: isSystemCaller) {
+                log.warn("Client", "delete_profile denied code=\(err.code) fd=\(fd)")
+                send(error: err)
+                return
+            }
+            manager.markProfileDeleted(profileId: r.profileId)
+            log.info("Client", "delete_profile profileId=\(r.profileId) existed=\(existed) fd=\(fd)")
+            send(resp: .profileDeleted(ProfileDeletedResponse(profileId: r.profileId, deleted: existed)))
         case .capacity:
             // H-9: per-node capacity report — the scheduler-placement input for an external
             // scheduler (fusion-gateway; cross-node scheduling/migration lands there per
@@ -452,6 +541,16 @@ final class FBClientConnection {
         send(resp: .error(error))
     }
 
+    // Issue #25: derived cookie key per browser, cached for this connection so repeated
+    // imports prompt the Keychain at most once. nil = key unavailable (encrypted rows skip).
+    private func cookieKey(_ browser: FBBrowserKind) -> Data? {
+        if let cached = cookieKeys[browser] { return cached }
+        guard let password = FBBrowserKeychain.safeStoragePassword(kind: browser) else { return nil }
+        let key = FBChromiumCookieCrypto.deriveKey(password: password)
+        cookieKeys[browser] = key
+        return key
+    }
+
     private func sendAuthed() {
         let ack = AuthAck(caps: caps.rawValue)
         // M-5 (1016 audit): the old `try?` swallowed an encode failure — the client then
@@ -472,6 +571,10 @@ final class FBClientConnection {
     // deadline rather than starving the shared dispatch pool.
     private static let writeDeadlineMs: Int32 = 5000
     private func writeAll(_ data: Data) {
+        // Serialize whole frames: stream pushes arrive on the hub capture thread while
+        // responses come from this client's queue.
+        writeLock.lock()
+        defer { writeLock.unlock() }
         var sent = 0
         // C-4: fetch a valid fd per call — a concurrent close must not leave this loop
         // writing to a closed/reused fd.
