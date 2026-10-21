@@ -152,7 +152,8 @@ public final class FBBrowserCookieImporter {
                         result.skippedOther += 1
                         return
                     }
-                    let (decrypted, status) = FBChromiumCookieCrypto.decrypt(encrypted, key: key)
+                    let (decrypted, status) = FBChromiumCookieCrypto.decrypt(encrypted, key: key,
+                                                                            hostKey: host)
                     switch status {
                     case .ok, .plaintext:
                         value = decrypted ?? ""

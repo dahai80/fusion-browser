@@ -364,3 +364,42 @@ final class CapabilityEnforcementTests: XCTestCase {
         XCTAssertEqual(state.error?.code, "auth_denied", "no caps -> auth_denied (fail-closed)")
     }
 }
+
+// Issue #25 + R-5: the idle reaper owns a second way for a session to end. It must run
+// the SAME post-close finalizers as an explicit close — a stream subscriber gets exactly
+// one stream_end. Without it the panel's iterator blocks forever (the client sets no
+// timeout on the stream socket) for a session that no longer exists.
+final class ReaperStreamTests: XCTestCase {
+    private func makeManager(hub: FBStreamHub) -> FBSessionManager {
+        let q = FBResourceQuota(maxSessions: 4, maxMemoryPerSessionMB: 150, maxTotalMemoryMB: 600)
+        return FBSessionManager(quota: q, guards: FBSchedulingGuards(),
+                                watchdog: FBWatchdogPolicy.default, creds: FBCredentialManager(),
+                                auth: FBAuth(token: "t"), allowedOrigins: [],
+                                sessionReaper: FBSessionReaperConfig(enabled: false, idleTimeoutMs: 1,
+                                                                     checkIntervalMs: 60_000),
+                                streamHub: hub)
+    }
+
+    private func decoded(_ data: Data) -> [String: Any]? {
+        guard data.count > 4 else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data.subdata(in: 4..<data.count))) as? [String: Any]
+    }
+
+    func testReaperEndsStreamExactlyOnce() {
+        let hub = FBStreamHub()
+        let mgr = makeManager(hub: hub)
+        guard case .success(let cr) = mgr.create(req: CreateSessionRequest(mode: .headless),
+                                                 traceId: nil) else {
+            return XCTFail("create failed")
+        }
+        var frames: [Data] = []
+        hub.subscribe(sessionId: cr.sessionId, key: "panel") { frames.append($0) }
+
+        mgr.reapIdle(now: Date().timeIntervalSince1970 + 60)
+
+        XCTAssertEqual(mgr.count(), 0, "idle session is reaped")
+        XCTAssertEqual(frames.count, 1, "reaper must emit exactly one stream_end")
+        XCTAssertEqual(decoded(frames[0])?["type"] as? String, "stream_end")
+        XCTAssertEqual(decoded(frames[0])?["session_id"] as? String, cr.sessionId)
+    }
+}

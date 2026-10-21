@@ -1,6 +1,7 @@
 import XCTest
 import SQLite3
 import CommonCrypto
+import CryptoKit
 @testable import FusionBrowser
 
 // Issue #25: browser cookie readers. Tests build real SQLite fixtures (the same
@@ -44,6 +45,47 @@ final class BrowserCookieImportTests: XCTestCase {
         XCTAssertEqual(attrs["expires"], "2000000000")
         XCTAssertEqual(result.skippedAppBound, 0)
         XCTAssertEqual(result.skippedOther, 0)
+    }
+
+    // Chrome 127+ (cookies DB meta version 24+) binds a v10/v11 value to its host by
+    // prepending SHA256(host_key) (32 bytes) to the plaintext BEFORE encryption. The
+    // decryptor must verify-then-strip that prefix, else every encrypted row on a modern
+    // Chrome profile fails UTF-8 decode and is silently counted as skipped.
+    func testChromiumV10HostKeyHashPrefixStripped() throws {
+        let base = tmpDir + "/chrome"
+        let db = base + "/Default/Network/Cookies"
+        try makeChromiumDB(db)
+        let key = FBChromiumCookieCrypto.deriveKey(password: password)
+        let host = ".example.com"
+        let bound = Data(SHA256.hash(data: Data(host.utf8))) + Data("tok-abc".utf8)
+        let cipher = encryptV10Blob(bound, key: key)
+        execSQL(db, "INSERT INTO cookies (host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,samesite) VALUES ('\(host)','sid','',\(blob(cipher)),'/',0,0,0,0);")
+
+        let importer = makeImporter(chromeDir: base)
+        guard case .success(let result) = importer.importCookies(kind: .chrome) else {
+            return XCTFail("expected success, got failure")
+        }
+        XCTAssertEqual(result.cookies.count, 1)
+        XCTAssertEqual(result.cookies.first?.attrs["value"], "tok-abc")
+        XCTAssertEqual(result.skippedOther, 0, "a host-bound value must not be skipped")
+    }
+
+    // The strip is verify-then-strip, NOT a blind 32-byte slice: a long value that does not
+    // start with SHA256(host_key) must arrive intact.
+    func testChromiumV10LongValueKeptWhenHashDoesNotMatch() throws {
+        let base = tmpDir + "/chrome"
+        let db = base + "/Default/Network/Cookies"
+        try makeChromiumDB(db)
+        let key = FBChromiumCookieCrypto.deriveKey(password: password)
+        let plain = String(repeating: "a", count: 40)
+        let cipher = encryptV10Blob(Data(plain.utf8), key: key)
+        execSQL(db, "INSERT INTO cookies (host_key,name,value,encrypted_value,path,expires_utc,is_secure,is_httponly,samesite) VALUES ('.example.com','sid','',\(blob(cipher)),'/',0,0,0,0);")
+
+        let importer = makeImporter(chromeDir: base)
+        guard case .success(let result) = importer.importCookies(kind: .chrome) else {
+            return XCTFail("expected success, got failure")
+        }
+        XCTAssertEqual(result.cookies.first?.attrs["value"], plain)
     }
 
     func testChromiumV20CountedAsAppBound() throws {
@@ -196,7 +238,10 @@ final class BrowserCookieImportTests: XCTestCase {
     }
 
     private func encryptV10(_ plain: String, key: Data) -> Data {
-        let data = Data(plain.utf8)
+        encryptV10Blob(Data(plain.utf8), key: key)
+    }
+
+    private func encryptV10Blob(_ data: Data, key: Data) -> Data {
         let outCapacity = data.count + kCCBlockSizeAES128
         var out = Data(count: outCapacity)
         var outLen = 0

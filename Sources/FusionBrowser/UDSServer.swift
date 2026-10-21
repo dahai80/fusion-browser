@@ -137,24 +137,54 @@ public final class FBUDSServer {
     }
 }
 
-final class FBClientConnection {
-    // C-4 (1016 audit): fd is closed by the cancel handler and used by onReadable — a
-    // plain let raced a concurrent close (close(fd) could land between a queued read's
-    // fd fetch and the read syscall; a REUSED fd number then gets read/written by this
-    // stale connection). NSLock-guarded: the cancel handler closes + invalidates under
-    // the lock; every use re-reads a valid fd.
+// C-4 + #25: one owner for a connection's socket number. The cancel handler closes the
+// fd while onReadable may be reading and (since the screenshot push path) the stream hub's
+// capture thread may be writing. A check-then-syscall on a bare Int raced that close: the
+// number could be REUSED by a new accept between the validity check and the syscall, so a
+// frame intended for client A landed in client B's socket and desynchronized its
+// length-prefixed stream. Every syscall now runs inside `withFd`, which holds the lock the
+// close path needs — a close cannot interleave with a read or write, and a closed guard
+// never hands out its number.
+final class FBAtomicFd {
+    private let lock = NSLock()
     private var fd: Int32
-    private let fdLock = NSLock()
-    // Fetch the fd if still valid (-1 after close).
-    private func validFd() -> Int32 {
-        fdLock.lock(); defer { fdLock.unlock() }
+
+    init(_ fd: Int32) {
+        self.fd = fd
+    }
+
+    // Current number, or -1 once closed. For logging / poll only — never syscall on it.
+    var value: Int32 {
+        lock.lock(); defer { lock.unlock() }
         return fd
     }
-    private func closeFd() {
-        fdLock.lock()
-        if fd >= 0 { Darwin.close(fd); fd = -1 }
-        fdLock.unlock()
+
+    // Runs body with a live fd while close() is blocked. nil when already closed.
+    func withFd<T>(_ body: (Int32) -> T) -> T? {
+        lock.lock(); defer { lock.unlock() }
+        guard fd >= 0 else { return nil }
+        return body(fd)
     }
+
+    func close() {
+        lock.lock()
+        if fd >= 0 {
+            Darwin.close(fd)
+            fd = -1
+        }
+        lock.unlock()
+    }
+}
+
+final class FBClientConnection {
+    // C-4 (1016 audit) + #25: the fd is owned by FBAtomicFd so the cancel handler, a queued
+    // read, and the stream hub's write thread can never operate a closed or reused number.
+    private let socket: FBAtomicFd
+    private func validFd() -> Int32 { socket.value }
+    private func closeFd() { socket.close() }
+    // Logging/diagnostic view of the socket number (-1 once closed). NEVER syscall on this:
+    // it can be closed and reused between the read and the call.
+    private var fd: Int32 { socket.value }
     private let manager: FBSessionManager
     private let driver: FBActionDriver
     private let auth: FBAuth
@@ -207,7 +237,7 @@ final class FBClientConnection {
     init(fd: Int32, manager: FBSessionManager, driver: FBActionDriver, auth: FBAuth,
          rateLimitConfig: FBRateLimitConfig, streamHub: FBStreamHub? = nil,
          onDone: @escaping (FBClientConnection) -> Void) {
-        self.fd = fd
+        self.socket = FBAtomicFd(fd)
         self.manager = manager
         self.driver = driver
         self.auth = auth
@@ -279,11 +309,12 @@ final class FBClientConnection {
 
     private func onReadable() {
         var buf = [UInt8](repeating: 0, count: 64 * 1024)
-        let curFd = validFd()
-        guard curFd >= 0 else { readSource?.cancel(); return }
-        let n = buf.withUnsafeMutableBufferPointer { ptr -> Int in
-            return Darwin.read(curFd, ptr.baseAddress, ptr.count)
+        // C-4 + #25: read inside the fd guard so a concurrent cancel cannot close/reuse the
+        // number between the check and the syscall (nil = the socket is gone).
+        let got: Int? = buf.withUnsafeMutableBufferPointer { ptr in
+            socket.withFd { Darwin.read($0, ptr.baseAddress, ptr.count) }
         }
+        guard let n = got else { readSource?.cancel(); return }
         if n == 0 {
             log.debug("Client", "EOF fd=\(fd)")
             readSource?.cancel()
@@ -592,16 +623,15 @@ final class FBClientConnection {
         writeLock.lock()
         defer { writeLock.unlock() }
         var sent = 0
-        // C-4: fetch a valid fd per call — a concurrent close must not leave this loop
-        // writing to a closed/reused fd.
-        let outFd = validFd()
-        guard outFd >= 0 else { return }
-        let fd = outFd
         while sent < data.count {
-            let n = data.withUnsafeBytes { raw -> Int in
+            // C-4 + #25: the write syscall runs INSIDE the fd guard, so a concurrent cancel
+            // cannot close (and a new accept cannot reuse) the number between the check and
+            // the write. nil = the socket is gone; drop out without writing.
+            let wrote: Int? = data.withUnsafeBytes { raw -> Int? in
                 let p = raw.bindMemory(to: UInt8.self).baseAddress!.advanced(by: sent)
-                return Darwin.write(fd, p, data.count - sent)
+                return socket.withFd { Darwin.write($0, p, data.count - sent) }
             }
+            guard let n = wrote else { return }
             if n < 0 {
                 if errno == EAGAIN || errno == EWOULDBLOCK {
                     if !awaitWritable() {
@@ -620,9 +650,10 @@ final class FBClientConnection {
     }
 
     // Block up to writeDeadlineMs for the fd to become writable. Returns false on
-    // timeout (caller should drop the client) or poll error.
+    // timeout (caller should drop the client) or poll error. poll only WATCHES the number —
+    // the actual write re-validates under the guard (FBAtomicFd.withFd), so a close that
+    // lands during the wait is picked up there instead of being written through.
     private func awaitWritable() -> Bool {
-        // C-4: same fd-validity discipline as writeAll.
         let curFd = validFd()
         guard curFd >= 0 else { return false }
         var pfd = pollfd(fd: curFd, events: Int16(POLLOUT), revents: 0)

@@ -181,3 +181,22 @@ final class StreamAccessTests: XCTestCase {
                                                 callerOwnerId: "B", callerOwnerKey: "k2"))
     }
 }
+
+// Issue #25: a panel that re-sends enabled:true (retry/reconnect loop) must not multiply
+// its own subscription. Each duplicate is another full base64 PNG written to the same
+// socket per action — an unbounded cost multiplier on one fd.
+final class StreamSubscribeDedupeTests: XCTestCase {
+    func testRepeatSubscribeFromSameConnectionReplacesNotStacks() {
+        let hub = FBStreamHub()
+        var frames: [Data] = []
+        let first = hub.subscribe(sessionId: "s1", key: "panel") { frames.append($0) }
+        let second = hub.subscribe(sessionId: "s1", key: "panel") { frames.append($0) }
+        XCTAssertEqual(first, 1)
+        XCTAssertEqual(second, 1, "a repeat subscribe from the same connection must replace, not stack")
+
+        var stub = StreamHubTests.FakeCapturable()
+        stub.autoComplete = true
+        hub.publish(sessionId: "s1", webview: stub)
+        XCTAssertEqual(frames.count, 1, "one subscribed connection gets one frame per publish")
+    }
+}

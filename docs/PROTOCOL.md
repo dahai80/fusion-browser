@@ -167,20 +167,26 @@ Ack (sent BEFORE the subscription starts):
 ```json
 {"type": "stream_ack", "payload": {"session_id": "<sid>", "active": true}}
 ```
-Pushed events (no request id):
+Pushed events (no request id). NOTE: these two are the ONLY envelopes that are
+FLAT — their fields sit at the top level, not under `payload` (`StreamHub.swift`
+encodes the event structs directly). Responses and acks keep the usual
+`{type, payload}` shape.
 ```json
-{"type": "screenshot_frame",
- "payload": {"session_id": "<sid>", "seq": 1, "png": "<base64>",
-             "url": "https://…", "title": "…", "ts_ms": 1761000000000}}
-{"type": "stream_end", "payload": {"session_id": "<sid>", "reason": "session_closed"}}
+{"type": "screenshot_frame", "session_id": "<sid>", "seq": 1, "png": "<base64>",
+ "url": "https://…", "title": "…", "ts_ms": 1761000000000}
+{"type": "stream_end", "session_id": "<sid>", "reason": "session_closed"}
 ```
 - Requires `screenshot`. Published after each successful action + each page
   `didFinish`; per-session min interval 200 ms with in-flight skip.
+- `enabled: true` is idempotent per connection: a repeat replaces that
+  connection's subscription instead of stacking a second copy of its stream.
 - Ownership: admitted for the session's creating CONNECTION or, because this is
   a read-only channel, the same PRINCIPAL (equal auth-token hash). Control ops
   stay connection-scoped. Different token → `not_owner`.
 - `enabled: false` unsubscribes and acks `active: false`. Exactly one
-  `stream_end` per subscriber at session close / connection cancel.
+  `stream_end` per subscriber when the session ends (explicit close or the idle
+  reaper). A CONNECTION DROP sends nothing — the stream dies with the socket, so
+  clients must treat EOF as terminal too.
 - A per-call-dial proxy cannot hold a subscription — direct UDS only.
 
 ### 3.7 delete_profile (issue #25)

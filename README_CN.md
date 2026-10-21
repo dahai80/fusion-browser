@@ -16,7 +16,7 @@ macOS 原生受控浏览器引擎，为 fusion-agent-studio 提供 Web 视觉与
 - **截图推送流** — 面板用独立 UDS 连接 `stream_screenshots`，每次动作/页面加载后推送 `screenshot_frame`（base64 PNG + url/title/seq，200ms 节流 + 在途跳过），会话结束推送一个 `stream_end`。这是只读通道：除会话创建连接外，同主体（相同 token 哈希）也可订阅；控制类操作仍按连接隔离。
 - **配套** — `cookieImport.*` 配置键、`FBStreamHub` + `FBWebView` 发布钩子、Python 客户端（`client/python/fusion_browser_client/`：`import_cookies`/`delete_profile`/`FusionBrowserStream`）、活验收脚本 `scripts/cowork_smoke.py`（release_gate 硬门）。
 - **验收中修掉两个真实缺陷**：所有注入 cookie 都变成 `Secure`（HTTPCookie 把存在的 `.secure` 键一律当 true），导致 http:// 页面收不到；面板流因 E-34 连接级归属返回 `not_owner`，只读通道改为同时放行同主体。
-- 契约与 cowork 侧交付物：[`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md)。编译通过，**294 单元测试通过**。
+- 契约与 cowork 侧交付物：[`docs/cowork-managed-backend-contract.md`](docs/cowork-managed-backend-contract.md)。编译通过，**300 单元测试通过**。
 
 
 Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器 / 反注入 Sanitizer / CDP 兼容层 / 凭据闭环）+ Phase 3 三任务（多节点动态配额 / CDP 扩 Domain + 事件 / 视觉定位兜底）+ Phase 4 五任务（无痕落盘验收 / RSS 自重启 / 性能基准套件 / UMA 共存基线 / 1000-action 长跑无泄漏）完成，编译通过，99 单元测试通过。CDP `:9222` 端到端冒烟通过；T3.4 视觉定位经真 VLM 冒烟验证；Phase 4 全部经 release 二进制 + Python 验收脚本实测通过。
@@ -77,7 +77,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 cd /Users/dahai/fusion/fusion-browser
 swift build                # debug（纯 Swift，无插件）
 swift build -c release     # release -> .build/release/fusion-browser
-swift test --disable-sandbox   # 294 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
+swift test --disable-sandbox   # 300 测试（--disable-sandbox 不再必须：插件已移除；保留为兼容）
 swift test --disable-sandbox --filter CDPServerTests   # 单个测试套
 ```
 
@@ -125,7 +125,7 @@ P4-2 RSS 自重启启用示例：
 
 均驱动 release 二进制（`swift build -c release` 后执行），live WKWebView 不在 `swift test` 覆盖范围。
 
-`scripts/release_gate.sh` 把 build + 294 确定性测试 + 11 个活脚本串成一个 PASS/FAIL 门。B-6/R-6 CI：`.github/workflows/release-gate.yml` 每个 PR 触发——`build-and-test` 跑在 GitHub-hosted `macos-14` runner，`live-path-gate` 跑在 self-hosted `[self-hosted, macos, arm64, gui]` runner（WKWebView 需 GUI session；`uma_coexist` 需 `:11434` 上的 fusion-mlx，设 `SKIP_UMA=1` 可跳过）。两个 job 均为必需状态检查——失败阻断合入。
+`scripts/release_gate.sh` 把 build + 300 确定性测试 + 11 个活脚本串成一个 PASS/FAIL 门。B-6/R-6 CI：`.github/workflows/release-gate.yml` 每个 PR 触发——`build-and-test` 跑在 GitHub-hosted `macos-14` runner，`live-path-gate` 跑在 self-hosted `[self-hosted, macos, arm64, gui]` runner（WKWebView 需 GUI session；`uma_coexist` 需 `:11434` 上的 fusion-mlx，设 `SKIP_UMA=1` 可跳过）。两个 job 均为必需状态检查——失败阻断合入。
 
 视觉定位启用示例（`~/.fusion-browser/config.json` 增量）：
 ```json
