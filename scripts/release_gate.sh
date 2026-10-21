@@ -3,7 +3,7 @@
 # swift test covers 0% of the WKWebView live path (ARCH-3: no main run loop under
 # swift test -> evaluateJSSync/screenshotSync deadlock). The live path is verified ONLY
 # by the built release binary + the Python verify harnesses in scripts/. This gate
-# wires them into one PASS/FAIL gate so "230 tests green" can never be misread as a
+# wires them into one PASS/FAIL gate so "237 tests green" can never be misread as a
 # live-path regression pass.
 #
 # E-17~20 (#68): Rust core removed — build is pure Swift now, no plugin, no cargo.
@@ -13,7 +13,7 @@
 #
 # Gate stages (each is a hard gate — first failure aborts with non-zero exit):
 #   1. swift build -c release --disable-sandbox   (pure Swift, no plugin)
-#   2. swift test --disable-sandbox               (deterministic unit tests, 230)
+#   2. swift test --disable-sandbox               (deterministic unit tests, 237)
 #   3. live-path verify harnesses against the release binary:
 #        verify_nonpersistent.py  (FR-04 non-persistence)
 #        navigate_execute_smoke.py (create-no-url -> execute navigate -> extract)
@@ -44,7 +44,7 @@ SKIP_PERF=0
 # --skip-tests: skip stage 2 (swift test). Use on runners where the deterministic
 # suite is already gated by a separate job (e.g. the self-hosted live-path runner,
 # whose Keychain is not interactive for the xctest subprocess -> credential tests
-# would fail with errSecInteractionNotAllowed; build-and-test covers the 230 suite).
+# would fail with errSecInteractionNotAllowed; build-and-test covers the 237 suite).
 SKIP_TESTS=0
 [[ "${1:-}" == "--skip-tests" ]] && SKIP_TESTS=1
 
@@ -68,9 +68,9 @@ run_gate() {
 # --- stage 1: build ---
 run_gate "swift build -c release" swift build -c release --disable-sandbox
 
-# --- stage 2: deterministic tests (230) ---
+# --- stage 2: deterministic tests (237) ---
 if [[ "$SKIP_TESTS" -eq 0 ]]; then
-    run_gate "swift test (230)" swift test --disable-sandbox
+    run_gate "swift test (237)" swift test --disable-sandbox
 else
     info "stage 2 skipped (--skip-tests): deterministic suite gated elsewhere"
 fi
@@ -90,6 +90,14 @@ HARD_HARNESSES=(
     "scripts/ownership_smoke.py"
     "scripts/perf_multipage.py"
 )
+# T-5 (1016 audit): verify_gateway_r10.py is the end-to-end gateway<->browser
+# capacity-plane proof, but it is CROSS-PROJECT — it needs the fusion-gateway
+# binary (~/fusion/fusion-gateway/gateway) + bcrypt + yaml, none of which this
+# repo's gate owns. Keeping the browser hard gate self-contained (release binary
+# + stdlib) means it is deliberately NOT a hard gate here. The browser-side
+# capacity plane IS deterministically gated: NodeCapacityTests (unit) +
+# multinode_smoke.py (informational, below). The gateway-side E2E gate lives in
+# fusion-gateway's CI (monorepo rule: the owning project gates its own surface).
 for h in "${HARD_HARNESSES[@]}"; do
     if [[ -f "$h" ]]; then
         run_gate "live: $h" python3 "$h"

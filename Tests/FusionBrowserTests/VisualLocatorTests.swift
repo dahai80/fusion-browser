@@ -46,6 +46,20 @@ final class VisualLocatorTests: XCTestCase {
         XCTAssertEqual(r?.y, 150)
     }
 
+    // M-16 (1016 audit): boolean JSON values must NOT bridge to (1,1) — `true as? Double`
+    // is 1.0 via NSNumber coercion, so a hallucinated {"x":true,"y":true} would parse as
+    // a syntactic in-bounds coordinate the VLM never emitted.
+    func testBooleanCoordsRejected() {
+        let client = FakeHTTPClient(assistantText: "{\"x\":true,\"y\":true}")
+        let loc = FBVisualLocator(config: enabledConfig(), client: client)
+        let r = loc.predict(screenshot: Data([0x89]), description: "button", viewportSize: (1280, 800))
+        XCTAssertNil(r, "boolean x/y must be rejected, not bridged to (1,1)")
+        let client2 = FakeHTTPClient(assistantText: "{\"x\":0.5,\"y\":true}")
+        let loc2 = FBVisualLocator(config: enabledConfig(), client: client2)
+        XCTAssertNil(loc2.predict(screenshot: Data([0x89]), description: "button", viewportSize: (1280, 800)),
+                     "a single boolean field must reject the whole coord")
+    }
+
     // L-18: a bare ```json fence (no surrounding prose) is the ONLY wrapping tolerated.
     func testParsesBareCodeFence() {
         let client = FakeHTTPClient(assistantText: "```json\n{\"x\": 42, \"y\": 88}\n```")

@@ -98,7 +98,10 @@ def main():
         # Client A: create a session.
         a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         a.connect(SOCK)
-        assert auth(a, TOKEN).get("type") == "auth_ack"
+        # P3 (1016 audit): bare `assert` is stripped under `python -O` -> silent pass.
+        ack_a = auth(a, TOKEN)
+        if not ack_a.get("type") == "auth_ack":
+            raise RuntimeError(f"client A auth failed: {ack_a}")
         send(a, {"type": "create_session", "payload": {"mode": "headless"}})
         cr = recv_one(a)
         sid = (cr.get("payload") or {}).get("sessionId") or (cr.get("payload") or {}).get("session_id")
@@ -108,7 +111,9 @@ def main():
         # Client B: a SEPARATE connection (different owner id) operates A's session.
         b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         b.connect(SOCK)
-        assert auth(b, TOKEN).get("type") == "auth_ack"
+        ack_b = auth(b, TOKEN)
+        if not ack_b.get("type") == "auth_ack":
+            raise RuntimeError(f"client B auth failed: {ack_b}")
         send(b, {"type": "execute",
                  "payload": {"sessionId": sid, "action": "screenshot"}})
         code = error_code(recv_one(b))

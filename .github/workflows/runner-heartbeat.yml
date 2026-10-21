@@ -1,0 +1,23 @@
+name: runner-heartbeat
+
+on:
+  schedule:
+    # G-3 (1016 audit): the live-path gate depends on a self-hosted GUI runner.
+    # When that runner goes offline, required checks stay pending forever and the
+    # live WKWebView coverage silently degrades to "best effort". A scheduled
+    # no-op job on the same runner labels surfaces the outage: a heartbeat run
+    # that never completes (or expires as failed-queued) means the runner is
+    # down and the live gate is not actually gating.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  heartbeat:
+    name: self-hosted runner alive
+    runs-on: [self-hosted, macos, arm64, gui]
+    timeout-minutes: 5
+    steps:
+      - name: Touch (no-op — completion is the heartbeat)
+        run: |
+          echo "runner alive at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          swift --version | head -1
