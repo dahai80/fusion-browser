@@ -403,3 +403,57 @@ final class ReaperStreamTests: XCTestCase {
         XCTAssertEqual(decoded(frames[0])?["session_id"] as? String, cr.sessionId)
     }
 }
+
+// MARK: C-2 (#16) — destroy path must never main.sync from a background caller
+
+final class DestroyPathDeadlockTests: XCTestCase {
+    private func makeManager() -> FBSessionManager {
+        let q = FBResourceQuota(maxSessions: 4, maxMemoryPerSessionMB: 150, maxTotalMemoryMB: 600)
+        return FBSessionManager(quota: q, guards: FBSchedulingGuards(),
+                                watchdog: FBWatchdogPolicy.default, creds: FBCredentialManager(),
+                                auth: FBAuth(token: "t"), allowedOrigins: [],
+                                sessionReaper: FBSessionReaperConfig(enabled: false, idleTimeoutMs: 1,
+                                                                     checkIntervalMs: 60_000),
+                                streamHub: nil)
+    }
+
+    func testSessionCloseFromBackgroundDoesNotBlockOnMain() {
+        // Park main (this XCTest thread) on the completion semaphore, then close()
+        // from a background thread. The pre-C-2 code did
+        // DispatchQueue.main.sync { destroy } inside close() — with main parked
+        // (e.g. executing a sessionmgr queue.sync), the close would never return
+        // (AB-BA: reaper holds the sessionmgr queue and waits for main; main waits
+        // for the sessionmgr queue). The async hop must return immediately.
+        let mgr = makeManager()
+        guard case .success(let cr) = mgr.create(req: CreateSessionRequest(mode: .headless),
+                                                 traceId: nil) else {
+            return XCTFail("create failed")
+        }
+        guard let s = mgr.get(cr.sessionId) else { return XCTFail("session missing") }
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            s.close()
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + .seconds(2)), .success,
+                       "close() from background must hop to main async (C-2), never main.sync")
+    }
+
+    func testManagerCloseFromBackgroundDoesNotBlockOnMain() {
+        // Same pin for the explicit close(sessionId:) path: extraction under the
+        // queue lock, teardown OFF the lock with an async main hop.
+        let mgr = makeManager()
+        guard case .success(let cr) = mgr.create(req: CreateSessionRequest(mode: .headless),
+                                                 traceId: nil) else {
+            return XCTFail("create failed")
+        }
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = mgr.close(sessionId: cr.sessionId)
+            done.signal()
+        }
+        XCTAssertEqual(done.wait(timeout: .now() + .seconds(2)), .success,
+                       "close(sessionId:) from background must not main.sync (C-2)")
+        XCTAssertEqual(mgr.count(), 0, "session removed")
+    }
+}
