@@ -201,6 +201,29 @@ public final class FBActionDriver {
         return .success(st)
     }
 
+    // A-1 (#15): verdict of a resolveClick/resolveType JS answer. Pure so the
+    // fail-loud contract (no silent fall-through to a success state response)
+    // is unit-testable without a live WKWebView (ARCH-3).
+    enum ResolverVerdict {
+        case ok             // {"ok": true} — action landed
+        case stale          // {"ok": false, "stale": true} — caller re-extracts
+        case nonContract    // {"ok": false, "stale": false} — unspecified state
+        case noAnswer       // nil/non-String/unparseable JSON — resolver never answered
+    }
+
+    static func classifyResolver(raw: Any?) -> ResolverVerdict {
+        guard let raw = raw as? String,
+              let data = raw.data(using: .utf8),
+              let r = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .noAnswer
+        }
+        let ok = r["ok"] as? Bool ?? false
+        let stale = r["stale"] as? Bool ?? false
+        if ok { return .ok }
+        if stale { return .stale }
+        return .nonContract
+    }
+
     // T2.1/T2.2 dispatch: navigate/click/type/scroll/screenshot/evaluate via WKWebView.
     // click/type resolve @eN via stable mapping WeakRef + fingerprint; stale -> node_stale.
     private func dispatch(session: FBSession, webview wv: FBWebView, req: BrowserActionRequest, sid: String, traceId: String, cancel: FBCancelToken) -> BrowserStateResponse {
@@ -245,14 +268,11 @@ public final class FBActionDriver {
                     log.warn("Action", "click unmapped @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
                     return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
                 }
-                if let raw = wv.evaluateJSSyncArgs(FBWalkerScript.resolveClick, args: [nid, mp.fingerprint]) as? String,
-                   let data = raw.data(using: .utf8),
-                   let r = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    let ok = r["ok"] as? Bool ?? false
-                    let stale = r["stale"] as? Bool ?? false
-                    if ok {
-                        // clicked
-                    } else if stale {
+                switch Self.classifyResolver(raw: wv.evaluateJSSyncArgs(FBWalkerScript.resolveClick, args: [nid, mp.fingerprint])) {
+                case .ok:
+                    // clicked
+                    break
+                case .stale:
                         log.warn("Action", "click node_stale @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
                         // A-4 (1016 audit): the visual fallback chain (screenshot + VLM call +
                         // elementFromPoint click) needs ~1.5s; if the click watchdog has less
@@ -297,14 +317,13 @@ public final class FBActionDriver {
                         } else {
                             return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
                         }
-                    } else {
-                        // A-1: ok:false && !stale is an UNSPECIFIED resolver state (JS contract
-                        // is ok/stale pairs) — the old code silently fell through and reported
-                        // a normal state response, masking a broken click. Fail loud.
-                        log.error("Action", "click resolver non-contract result ok=false stale=false sess=\(sid)", traceId: traceId, sessionId: sid)
-                        return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
-                    }
-                } else {
+                case .nonContract:
+                    // A-1: ok:false && !stale is an UNSPECIFIED resolver state (JS contract
+                    // is ok/stale pairs) — the old code silently fell through and reported
+                    // a normal state response, masking a broken click. Fail loud.
+                    log.error("Action", "click resolver non-contract result ok=false stale=false sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
+                case .noAnswer:
                     // A-1: raw nil / parse failure = the resolver never answered. Old code
                     // silently fell through as success. Fail loud.
                     log.error("Action", "click resolver no/invalid answer sess=\(sid)", traceId: traceId, sessionId: sid)
@@ -320,22 +339,18 @@ public final class FBActionDriver {
                     log.warn("Action", "type unmapped @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
                     return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
                 }
-                if let raw = wv.evaluateJSSyncArgs(FBWalkerScript.resolveType, args: [nid, mp.fingerprint, text]) as? String,
-                   let data = raw.data(using: .utf8),
-                   let r = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    let ok = r["ok"] as? Bool ?? false
-                    let stale = r["stale"] as? Bool ?? false
-                    if ok {
-                        // typed
-                    } else if stale {
-                        log.warn("Action", "type node_stale @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
-                        return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
-                    } else {
-                        // A-1: non-contract resolver result — fail loud (see click branch).
-                        log.error("Action", "type resolver non-contract result sess=\(sid)", traceId: traceId, sessionId: sid)
-                        return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
-                    }
-                } else {
+                switch Self.classifyResolver(raw: wv.evaluateJSSyncArgs(FBWalkerScript.resolveType, args: [nid, mp.fingerprint, text])) {
+                case .ok:
+                    // typed
+                    break
+                case .stale:
+                    log.warn("Action", "type node_stale @\(nid) sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .nodeStale, startTs: startTs)
+                case .nonContract:
+                    // A-1: non-contract resolver result — fail loud (see click branch).
+                    log.error("Action", "type resolver non-contract result sess=\(sid)", traceId: traceId, sessionId: sid)
+                    return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)
+                case .noAnswer:
                     // A-1: resolver no/invalid answer — fail loud.
                     log.error("Action", "type resolver no/invalid answer sess=\(sid)", traceId: traceId, sessionId: sid)
                     return errorResp(session: session, req: req, traceId: traceId, err: .internalError, startTs: startTs)

@@ -135,3 +135,37 @@ final class Audit1016Tests: XCTestCase {
         wait(for: [fired], timeout: 0.3)
     }
 }
+
+// MARK: A-1 (#15) resolver verdict classification
+
+final class ResolverVerdictTests: XCTestCase {
+    // Pinned contract: only ok:true is success; stale -> node_stale; anything else
+    // (ok:false stale:false, nil, non-String, unparseable JSON) must FAIL LOUD — the
+    // old code fell through to a success state response and agent loops advanced on
+    // wrong state. Pure function so this needs no live WKWebView (ARCH-3).
+
+    func testOkVerdict() {
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"{"ok":true}"#), .ok)
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"{"ok":true,"stale":false}"#), .ok)
+    }
+
+    func testStaleVerdict() {
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"{"ok":false,"stale":true}"#), .stale)
+    }
+
+    func testNonContractVerdict() {
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"{"ok":false,"stale":false}"#), .nonContract)
+        // Missing keys default to false — not ok, not stale: non-contract.
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"{}"#), .nonContract)
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"{"ok":"yes"}"#), .nonContract)
+    }
+
+    func testNoAnswerVerdict() {
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: nil), .noAnswer)
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: 42), .noAnswer)
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: "not json"), .noAnswer)
+        XCTAssertEqual(FBActionDriver.classifyResolver(raw: #"[1,2]"#), .noAnswer)
+    }
+}
+
+extension FBActionDriver.ResolverVerdict: Equatable {}
