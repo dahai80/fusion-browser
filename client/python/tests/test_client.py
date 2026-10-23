@@ -291,3 +291,129 @@ def test_stream_yields_frame_then_stops_on_stream_end(fake_server):
     types = [r["type"] for r in srv.requests]
     assert types[0] == "auth"
     assert "stream_screenshots" in types
+
+
+# -- Issue #19: connection desync after mid-frame transport faults ------------
+
+
+class FaultServer(FakeServer):
+    """Issue #19: the FIRST connection is sabotaged mid-response; later
+    connections behave like a healthy FakeServer (used to prove the client
+    closed the dead connection and auto-reconnected).
+
+    mode:
+      - "stall":    header claims 1000 bytes, only 10 sent, then holds the
+                    socket open past the client timeout (socket.timeout path)
+      - "truncated": header + partial body, then closes mid-frame (EOF path)
+      - "huge_len": header claims 5GB — over the 64MB frame cap
+    """
+
+    def __init__(self, path, mode, token="test-token"):
+        super().__init__(path, token)
+        self.mode = mode
+        self._fault_injected = False
+
+    def _handle(self, conn):
+        if self._fault_injected:
+            super()._handle(conn)
+            return
+        self._fault_injected = True
+        try:
+            msg = _recv_one(conn)
+            if msg is None or msg.get("type") == "auth":
+                if msg is not None:
+                    _send(conn, {"type": "auth_ack"})
+                    msg = _recv_one(conn)
+                if msg is None:
+                    return
+                self.requests.append(msg)
+            if self.mode == "stall":
+                conn.sendall(struct.pack(">I", 1000) + b"x" * 10)
+                while not self._stop:
+                    time.sleep(0.05)
+            elif self.mode == "truncated":
+                conn.sendall(struct.pack(">I", 1000) + b"x" * 10)
+            elif self.mode == "huge_len":
+                # u32 max is 4GB-1 — 3GB still dwarfs the 64MB cap.
+                conn.sendall(struct.pack(">I", 3 * 1024 * 1024 * 1024))
+                while not self._stop:
+                    time.sleep(0.05)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+
+@pytest.fixture
+def fault_server(tmp_path):
+    def make(mode):
+        fd, path = tempfile.mkstemp(suffix=".sock", dir="/tmp", prefix="fbc-fault-")
+        os.close(fd)
+        os.unlink(path)
+        srv = FaultServer(path, mode=mode, token="test-token")
+        srv.start()
+        return srv, path
+
+    yield make
+
+
+def _drain_fault_server(srv):
+    srv.stop()
+
+
+def test_mid_frame_timeout_closes_connection_and_reconnects(fault_server):
+    srv, path = fault_server("stall")
+    try:
+        c = FusionBrowserClient(socket_path=path, token="test-token", timeout=0.5)
+        with pytest.raises(FBError) as exc:
+            c.metrics()
+        assert exc.value.code == "connection_closed"
+        assert "transport fault" in exc.value.message
+        # Issue #19 core assertion: the desynced connection must be gone, not kept.
+        assert c._sock is None
+        assert c._authed is False
+        # Next op auto-reconnects on a fresh, healthy connection.
+        m = c.metrics()
+        assert m == {"counters": [["sessions", 1]]}
+        c.close()
+    finally:
+        _drain_fault_server(srv)
+
+
+def test_truncated_body_closes_connection_and_reconnects(fault_server):
+    srv, path = fault_server("truncated")
+    try:
+        c = FusionBrowserClient(socket_path=path, token="test-token", timeout=5.0)
+        with pytest.raises(FBError) as exc:
+            c.metrics()
+        assert exc.value.code == "connection_closed"
+        assert "server closed mid-frame" in exc.value.message
+        assert c._sock is None
+        assert c._authed is False
+        m = c.metrics()
+        assert m == {"counters": [["sessions", 1]]}
+        c.close()
+    finally:
+        _drain_fault_server(srv)
+
+
+def test_over_cap_frame_length_fails_fast_and_closes(fault_server):
+    srv, path = fault_server("huge_len")
+    try:
+        c = FusionBrowserClient(socket_path=path, token="test-token", timeout=30.0)
+        t0 = time.monotonic()
+        with pytest.raises(FBError) as exc:
+            c.metrics()
+        elapsed = time.monotonic() - t0
+        # Fails from the decoded length field, NOT by reading 3GB.
+        assert elapsed < 5.0
+        assert exc.value.code == "connection_closed"
+        assert "exceeds cap" in exc.value.message
+        # Issue #19 residual hole: the cap FBError must also kill the connection.
+        assert c._sock is None
+        assert c._authed is False
+        m = c.metrics()
+        assert m == {"counters": [["sessions", 1]]}
+        c.close()
+    finally:
+        _drain_fault_server(srv)
