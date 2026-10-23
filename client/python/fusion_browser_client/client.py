@@ -244,6 +244,11 @@ class FusionBrowserClient:
             self.close()
             raise FBError("connection_closed",
                           "transport fault: %s" % type(e).__name__) from e
+        except FBError:
+            # Issue #19: the frame-length cap fired — the stream is desynced. Kill the
+            # connection so the next op auto-reconnects instead of reading garbage.
+            self.close()
+            raise
         if resp is None:
             self.close()
             raise FBError("connection_closed", "server closed mid-frame")
@@ -396,6 +401,10 @@ class FusionBrowserStream:
         except (socket.timeout, OSError) as e:
             self.close()
             raise FBError("connection_closed", "stream transport fault: %s" % type(e).__name__) from e
+        except FBError:
+            # Issue #19: frame-cap hit — desynced stream; kill the connection.
+            self.close()
+            raise
 
     def _auth(self) -> None:
         if self._authed or self._sock is None:
