@@ -90,9 +90,12 @@ def main():
             except Exception:
                 if s: s.close()
                 time.sleep(0.1)
-        assert s is not None
+        if s is None:
+            raise SystemExit("[perf_bench] FAIL: could not connect to UDS socket")
         send(s, {"type": "auth", "token": TOKEN})
-        assert recv(s).get("type") == "auth_ack"
+        ack = recv(s)
+        if not (ack and ack.get("type") == "auth_ack"):
+            raise SystemExit(f"[perf_bench] FAIL: auth not acked: {ack}")
 
         # Page with a stable interactive button (@e1) for click latency. Note:
         # EVALUATE is a gated capability (excluded from .default caps) so the

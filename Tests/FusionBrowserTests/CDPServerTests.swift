@@ -605,6 +605,36 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         return fd
     }
 
+    // #23 residue (Q2): bounded readiness poll instead of a fixed 100ms sleep after
+    // server.start() — fast machines skip the wait, slow machines don't flake. Retries a
+    // real TCP connect every 10ms for up to 2s; returns the CONNECTED fd. (connect(port:)
+    // itself ignores the connect result, so it can hand back an unusable fd — this helper
+    // checks it.) Fail-loud: XCTFail + -1 if the server never accepts within the bound.
+    private func waitReady(port: Int, file: StaticString = #filePath, line: UInt = #line) -> Int32 {
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = UInt16(port).bigEndian
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let ok = withUnsafePointer(to: &addr) { p in
+                p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    Darwin.connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+                }
+            }
+            if ok {
+                var tv = timeval(tv_sec: 3, tv_usec: 0)
+                _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+                return fd
+            }
+            Darwin.close(fd)
+            usleep(10_000)
+        }
+        XCTFail("CDP server on port \(port) never accepted a connection within 2s", file: file, line: line)
+        return -1
+    }
+
     private func sendAll(fd: Int32, _ s: String) {
         _ = s.withCString { Darwin.write(fd, $0, strlen($0)) }
     }
@@ -629,9 +659,7 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port)
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, authed("GET /json HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
         let raw = recvUntil(fd: fd, marker: Data("]".utf8))
@@ -651,9 +679,7 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port)
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, authed("GET /json/version HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
         let raw = recvUntil(fd: fd, marker: Data("}".utf8))
@@ -671,12 +697,10 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port, allowedOrigins: ["https://example.com"])
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
         let key = "dGhlIHNhbXBsZSBub25jZQ=="
         let expected = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8)))
             .base64EncodedString()
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, authed("GET /devtools/page/\(server.targetId) HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
                         "Origin: https://example.com\r\n" +
@@ -697,10 +721,8 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
             return s
         }() else { XCTFail("server start failed"); return }
         defer { server.stop() }
-        usleep(100_000)
-
         let key = "dGhlIHNhbXBsZSBub25jZQ=="
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, authed("GET /devtools/page/\(server.targetId) HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
                         "Origin: https://example.com\r\n" +
@@ -740,10 +762,8 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port)
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
         let key = "dGhlIHNhbXBsZSBub25jZQ=="
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         // No Authorization header.
         sendAll(fd: fd, "GET /devtools/page/\(server.targetId) HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
@@ -762,9 +782,7 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port)
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, "GET /json HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         let raw = recvUntil(fd: fd, marker: Data("\r\n\r\n".utf8))
@@ -789,10 +807,8 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
                                  auth: auth, allowedOrigins: ["https://example.com"])
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
         let key = "dGhlIHNhbXBsZSBub25jZQ=="
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, authed("GET /devtools/page/\(server.targetId) HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
                         "Origin: https://evil.attacker.com\r\n" +
@@ -813,10 +829,8 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port, allowedOrigins: ["https://example.com"])
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
         let key = "dGhlIHNhbXBsZSBub25jZQ=="
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         // Valid Bearer (authed), but NO Origin header at all.
         sendAll(fd: fd, authed("GET /devtools/page/\(server.targetId) HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
@@ -836,9 +850,7 @@ final class CDPDiscoveryLoopbackTests: XCTestCase {
         let server = makeServer(port: port, allowedOrigins: [])
         try server.start()
         defer { server.stop() }
-        usleep(100_000)
-
-        let fd = connect(port: port)
+        let fd = waitReady(port: port)
         defer { Darwin.close(fd) }
         sendAll(fd: fd, authed("PUT /json/new?https://evil.attacker.com HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
         let raw = recvUntil(fd: fd, marker: Data("\r\n\r\n".utf8))

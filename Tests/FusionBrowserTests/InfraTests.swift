@@ -276,21 +276,25 @@ final class SchedulerTests: XCTestCase {
     // E-23: rebuildDepth counts ONLY real replays. handleCrash must check isIdempotent
     // FIRST and call canRebuild() (which increments) only on the idempotent/replay branch.
     // A non-idempotent crash (click/type/navigate/evaluate) is never replayed, so it must
-    // NOT consume the depth cap. This test encodes the order contract: simulate two
-    // consecutive non-idempotent crashes (slow-page click timeouts) and assert the cap is
-    // still fully available for a real idempotent replay afterward. The old order
-    // (canRebuild before isIdempotent) bricked the session permanent_fail on the 2nd crash.
+    // NOT consume the depth cap. Pins the order contract via the REAL gate classifyCrash
+    // (the seam handleCrash itself switches on), not a re-implementation of the order:
+    // simulate two consecutive non-idempotent crashes (slow-page click timeouts) and
+    // assert the cap is still fully available for a real idempotent replay afterward.
+    // The old order (canRebuild before isIdempotent) bricked the session permanent_fail
+    // on the 2nd crash.
     func testRebuildDepthNotConsumedByNonIdempotentCrash() {
         let g = FBSchedulingGuards(maxActions: 100, taskTimeoutMs: 60_000, repeatActionBreak: 99, rebuildDepthCap: 1)
         let s = FBScheduler(guards: g)
-        // E-23 order: non-idempotent crash path skips canRebuild() entirely.
+        // E-23 order via the real seam: non-idempotent crash -> failNoReplay, cap untouched.
         let nonIdempotentCrashes: [ActionType] = [.click, .navigate, .typeText, .evaluate]
         for action in nonIdempotentCrashes {
-            if FBScheduler.isIdempotent(action) { s.canRebuild() } // would-replay branch only
+            XCTAssertEqual(FBActionDriver.classifyCrash(action: action, scheduler: s), .failNoReplay)
         }
-        // Cap still fully intact: one real idempotent replay still admitted.
-        XCTAssertTrue(s.canRebuild(), "non-idempotent crashes must not consume rebuildDepth")
-        XCTAssertFalse(s.canRebuild(), "cap exhausted only after a real replay")
+        // Cap still fully intact: one real idempotent replay still admitted, then capped.
+        XCTAssertEqual(FBActionDriver.classifyCrash(action: .scroll, scheduler: s), .rebuildAdmitted,
+                       "non-idempotent crashes must not consume rebuildDepth")
+        XCTAssertEqual(FBActionDriver.classifyCrash(action: .scroll, scheduler: s), .failReplayLimit,
+                       "cap exhausted only after a real replay")
     }
 }
 

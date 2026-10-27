@@ -3,7 +3,7 @@
 # swift test covers 0% of the WKWebView live path (ARCH-3: no main run loop under
 # swift test -> evaluateJSSync/screenshotSync deadlock). The live path is verified ONLY
 # by the built release binary + the Python verify harnesses in scripts/. This gate
-# wires them into one PASS/FAIL gate so "300 tests green" can never be misread as a
+# wires them into one PASS/FAIL gate so "308 tests green" can never be misread as a
 # live-path regression pass.
 #
 # E-17~20 (#68): Rust core removed — build is pure Swift now, no plugin, no cargo.

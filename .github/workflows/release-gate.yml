@@ -71,7 +71,11 @@ jobs:
         # The self-hosted runner host cannot reach github.com:443 (HTTPS times out),
         # but port 22 (SSH) works with the runner user's existing SSH key. Rewrite
         # https://github.com/ -> git@github.com: so actions/checkout's fetch uses SSH.
-        run: git config --global url."git@github.com:".insteadOf "https://github.com/"
+        # Job-scoped via GIT_CONFIG_GLOBAL pointing at a temp file — `git config
+        # --global` would permanently mutate the runner user's ~/.gitconfig.
+        run: |
+          git config --file "$RUNNER_TEMP/job-gitconfig" url."git@github.com:".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/job-gitconfig" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
 
