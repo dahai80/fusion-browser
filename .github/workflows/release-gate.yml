@@ -131,7 +131,12 @@ jobs:
           fi
 
       - name: Upload harness reports
+        # Diagnostic only — the gate itself is the step above. The self-hosted
+        # runner host has flaky/blocked HTTPS to GitHub blob storage (ETIMEDOUT),
+        # so a failed artifact upload must not fail the required check and
+        # block merges. Reports stay on the runner disk as fallback.
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: live-path-reports
