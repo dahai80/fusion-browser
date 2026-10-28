@@ -27,11 +27,11 @@ TOKEN = "uma-token"
 BIN = os.path.join(os.path.dirname(__file__), "..", ".build", "release", "fusion-browser")
 CONFIG = os.path.expanduser("~/.fusion-browser/config.json")
 MLX = "http://localhost:11434"
-# Resolve the MLX API key the same way start.sh does: FUSION_MLX_API_KEY env
+# Resolve the MLX API key the same way start.sh does: FUSION_CLIENT_KEY env
 # var first, else settings.json auth.api_key. A hardcoded key silently 401s
 # when the operator rotates it (env var is the source of truth on this host).
 def _resolve_mlx_key():
-    env = os.environ.get("FUSION_MLX_API_KEY")
+    env = os.environ.get("FUSION_CLIENT_KEY")
     if env:
         return env
     settings = os.path.expanduser("~/.fusion-mlx/settings.json")

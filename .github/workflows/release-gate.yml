@@ -65,7 +65,7 @@ jobs:
       # the runner's env or Actions secrets. If the runner has no fusion-mlx, set
       # SKIP_UMA=1 to drop only the MLX harness (10 of 11 live harnesses still run).
       SKIP_UMA: ${{ vars.SKIP_UMA || '0' }}
-      FUSION_MLX_API_KEY: ${{ secrets.FUSION_MLX_API_KEY }}
+      FUSION_CLIENT_KEY: ${{ secrets.FUSION_CLIENT_KEY }}
     steps:
       - name: Route git over SSH (HTTPS to github.com blocked on runner host)
         # The self-hosted runner host cannot reach github.com:443 (HTTPS times out),
@@ -86,13 +86,13 @@ jobs:
         if: env.SKIP_UMA != '1'
         run: |
           # fusion-mlx /v1/models is Bearer-gated; -sf exits non-zero on a 401/5xx.
-          # FUSION_MLX_API_KEY is the admin key (set as a repo secret). A missing
+          # FUSION_CLIENT_KEY is the admin key (set as a repo secret). A missing
           # key or unreachable engine makes uma_coexist impossible -> fail fast.
-          if [[ -z "$FUSION_MLX_API_KEY" ]]; then
-            echo "::warning::FUSION_MLX_API_KEY secret not set; set it or SKIP_UMA=1"
+          if [[ -z "$FUSION_CLIENT_KEY" ]]; then
+            echo "::warning::FUSION_CLIENT_KEY secret not set; set it or SKIP_UMA=1"
             exit 1
           fi
-          curl -sf -H "Authorization: Bearer $FUSION_MLX_API_KEY" \
+          curl -sf -H "Authorization: Bearer $FUSION_CLIENT_KEY" \
             http://localhost:11434/v1/models >/dev/null 2>&1 \
             || { echo "::warning::fusion-mlx not reachable on :11434 (or key rejected); set SKIP_UMA=1 or start it"; exit 1; }
 
