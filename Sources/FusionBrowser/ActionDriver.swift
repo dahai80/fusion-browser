@@ -211,6 +211,15 @@ public final class FBActionDriver {
         case noAnswer       // nil/non-String/unparseable JSON — resolver never answered
     }
 
+    // E-23 (#23 residue Q1): verdict of the crash-rebuild gate. Pure seam so the
+    // ORDER contract (isIdempotent FIRST; canRebuild only on the replay branch) is
+    // unit-testable without a live session.
+    enum FBCrashPlan: Equatable {
+        case failNoReplay     // non-idempotent action — fail, depth cap untouched
+        case failReplayLimit  // idempotent but cap exhausted — permanent_fail
+        case rebuildAdmitted  // idempotent, cap consumed — rebuild path
+    }
+
     static func classifyResolver(raw: Any?) -> ResolverVerdict {
         guard let raw = raw as? String,
               let data = raw.data(using: .utf8),
@@ -461,34 +470,44 @@ public final class FBActionDriver {
     // replay (no lastUrl re-navigate path), so report recovered:false on every branch — the
     // session is re-marked runnable for the next action, but the caller is told the failed
     // action was NOT recovered (page state may be inconsistent; the next action re-extracts).
+    // E-23: rebuildDepth must count ONLY real replays. A non-idempotent action
+    // (navigate/click/type/evaluate) is never replayed, so it must NOT consume the
+    // depth cap. classifyCrash checks idempotency FIRST; only an idempotent action
+    // that will actually be replayed may call canRebuild() (which increments). The
+    // old order called canRebuild() before isIdempotent, so two slow-page click
+    // timeouts (non-idempotent, never replayed) exhausted rebuildDepthCap=1 and
+    // bricked the session permanent_fail. L-1: .navigate is non-idempotent
+    // (POST/onLoad side effects), so it lands here too. Pure seam (mirrors
+    // classifyResolver) so tests pin the ORDER contract via the real logic.
+    static func classifyCrash(action: ActionType, scheduler: FBScheduler) -> FBCrashPlan {
+        guard FBScheduler.isIdempotent(action) else {
+            return .failNoReplay
+        }
+        return scheduler.canRebuild() ? .rebuildAdmitted : .failReplayLimit
+    }
+
     private func handleCrash(session: FBSession, req: BrowserActionRequest, traceId: String,
                              err: FBError, startTs: Double) -> BrowserStateResponse {
         session.transition(to: .crashed)
-        // E-23: rebuildDepth must count ONLY real replays. A non-idempotent action
-        // (navigate/click/type/evaluate) is never replayed, so it must NOT consume the
-        // depth cap. Check idempotency FIRST; only an idempotent action that will actually
-        // be replayed may call canRebuild() (which increments). The old order called
-        // canRebuild() before isIdempotent, so two slow-page click timeouts (non-idempotent,
-        // never replayed) exhausted rebuildDepthCap=1 and bricked the session permanent_fail.
-        // L-1: .navigate is non-idempotent (POST/onLoad side effects), so it lands here too.
-        guard FBScheduler.isIdempotent(req.action) else {
+        switch Self.classifyCrash(action: req.action, scheduler: session.scheduler) {
+        case .failNoReplay:
             // Non-idempotent: no replay, no depth consumed -> fail directly, session runnable.
             session.transition(to: .running)
             return errorResp(session: session, req: req, traceId: traceId, err: err, startTs: startTs,
                              recovered: false)
-        }
-        // Idempotent: this is a real replay candidate -> consume the depth cap now.
-        guard session.scheduler.canRebuild() else {
+        case .failReplayLimit:
             session.transition(to: .permanentFail)
             return errorResp(session: session, req: req, traceId: traceId, err: .replayLimit, startTs: startTs,
                              recovered: false)
+        case .rebuildAdmitted:
+            session.transition(to: .rebuilding)
+            log.info("Action", "rebuild admit idempotent action=\(req.action.rawValue) sess=\(session.id)",
+                     traceId: traceId, sessionId: session.id)
+            // No re-navigate (no lastUrl tracked); re-mark runnable, report honestly NOT recovered.
+            session.transition(to: .running)
+            return errorResp(session: session, req: req, traceId: traceId, err: err, startTs: startTs,
+                             recovered: false)
         }
-        session.transition(to: .rebuilding)
-        log.info("Action", "rebuild admit idempotent action=\(req.action.rawValue) sess=\(session.id)",
-                 traceId: traceId, sessionId: session.id)
-        // No re-navigate (no lastUrl tracked); re-mark runnable, report honestly NOT recovered.
-        session.transition(to: .running)
-        return errorResp(session: session, req: req, traceId: traceId, err: err, startTs: startTs, recovered: false)
     }
 
     private func errorResp(session: FBSession, req: BrowserActionRequest, traceId: String,

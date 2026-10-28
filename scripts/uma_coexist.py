@@ -121,9 +121,12 @@ def main():
             except Exception:
                 if s: s.close()
                 time.sleep(0.1)
-        assert s is not None
+        if s is None:
+            raise SystemExit("[uma_coexist] FAIL: could not connect to UDS socket")
         send(s, {"type": "auth", "token": TOKEN})
-        assert recv(s).get("type") == "auth_ack"
+        ack = recv(s)
+        if not (ack and ack.get("type") == "auth_ack"):
+            raise SystemExit(f"[uma_coexist] FAIL: auth not acked: {ack}")
 
         # pre-sample: browser RSS + mlx memory + inference baseline.
         # WARM the model with one ping BEFORE sampling mem0: MLX lazy-loads a

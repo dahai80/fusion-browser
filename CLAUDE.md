@@ -44,7 +44,7 @@ token hash) for this READ-ONLY channel, while create/execute/close stay
 UUID-scoped (`StreamAccessTests`). Python client gained `import_cookies` /
 `delete_profile` / `profile_id` / `FusionBrowserStream`. Contract:
 `docs/cowork-managed-backend-contract.md`; live harness `scripts/cowork_smoke.py`
-(HARD gate). Build green, **300 tests** pass, Python client 14 pass.
+(HARD gate). Build green, **308 tests** pass, Python client 14 pass.
 Post-landing review wave fixed four more real defects: (c) Chrome 127+ binds a
 `v10`/`v11` value with a 32-byte `SHA256(host_key)` prefix, so every encrypted row
 on a modern Chrome/Edge profile failed UTF-8 decode and was skipped —

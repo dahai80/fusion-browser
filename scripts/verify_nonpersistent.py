@@ -101,10 +101,12 @@ def main():
             except (FileNotFoundError, ConnectionRefusedError):
                 if s: s.close()
                 time.sleep(0.1)
-        assert s is not None, "could not connect to UDS socket"
+        if s is None:
+            raise SystemExit("[verify_nonpersistent] FAIL: could not connect to UDS socket")
         send(s, {"type": "auth", "token": TOKEN})
         ack = recv_one(s)
-        assert ack and ack.get("type") == "auth_ack", f"auth failed: {ack}"
+        if not (ack and ack.get("type") == "auth_ack"):
+            raise SystemExit(f"[verify_nonpersistent] FAIL: auth failed: {ack}")
 
         # data URL that sets a cookie + localStorage entry (triggers persistence path
         # if the store were persistent; nonPersistent must absorb it in memory).
@@ -116,7 +118,8 @@ def main():
         send(s, {"type": "create_session", "payload": {"mode": "headless", "initial_url": data_url}})
         cr = recv_one(s)
         sid = cr.get("payload", {}).get("session_id")
-        assert sid, f"no session: {cr}"
+        if not sid:
+            raise SystemExit(f"[verify_nonpersistent] FAIL: no session: {cr}")
         print(f"[verify] session={sid}")
 
         # give WKWebView a moment to load the data URL + run the script
