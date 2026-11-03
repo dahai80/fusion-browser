@@ -27,21 +27,26 @@ TOKEN = "uma-token"
 BIN = os.path.join(os.path.dirname(__file__), "..", ".build", "release", "fusion-browser")
 CONFIG = os.path.expanduser("~/.fusion-browser/config.json")
 MLX = "http://localhost:11434"
-# Resolve the MLX API key the same way start.sh does: FUSION_CLIENT_KEY env
-# var first, else settings.json auth.api_key. A hardcoded key silently 401s
-# when the operator rotates it (env var is the source of truth on this host).
+# Resolve the MLX API key via the canonical resolver (config governance Phase
+# 2.2, issue #35): fusion_core.config.client_key() owns the resolution chain
+# (FUSION_CLIENT_KEY env -> settings.json fallback -> warn). Bare-install
+# fallback keeps the harness runnable without the workspace venv.
 def _resolve_mlx_key():
-    env = os.environ.get("FUSION_CLIENT_KEY")
-    if env:
-        return env
-    settings = os.path.expanduser("~/.fusion-mlx/settings.json")
     try:
-        with open(settings) as f:
-            return json.load(f).get("auth", {}).get("api_key", "")
-    except Exception:
-        return ""
+        from fusion_core.config import client_key
+        return client_key()
+    except ImportError:
+        env = os.environ.get("FUSION_CLIENT_KEY")
+        if env:
+            return env
+        settings = os.path.expanduser("~/.fusion-mlx/settings.json")
+        try:
+            with open(settings) as f:
+                return json.load(f).get("auth", {}).get("api_key", "")
+        except Exception:
+            return ""
 MLX_KEY = _resolve_mlx_key()
-MLX_MODEL = "mlx-community-Llama-3.2-1B-Instruct-4bit"
+MLX_MODEL = "mlx-community--Llama-3.2-1B-Instruct-4bit"
 OUT = os.path.join(os.path.dirname(__file__), "uma-report.json")
 N_SESSIONS = 10
 N_ACTIONS = 100
