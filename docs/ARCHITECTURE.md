@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/architecture
+product: fusion-browser
+class: app
+entry: service
+doc_type: architecture
+title: { zh: "架构说明", en: "Architecture" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/ARCHITECTURE.md
+---
+
 # Architecture
 
 > fusion-browser — macOS native controlled browser engine.

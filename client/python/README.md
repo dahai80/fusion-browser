@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "Python 客户端说明", en: "Python client guide" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - client/python/README.md
+---
+
 # fusion-browser-client (Python)
 
 A thin, maintained Python client for the **fusion-browser** UDS JSON-RPC server

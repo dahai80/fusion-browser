@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "Cowork Managed-Browser Backend Implementation Plan", en: "Cowork Managed-Browser Backend Implementation Plan" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/superpowers/plans/2026-10-21-cowork-managed-backend.md
+---
+
 # Cowork Managed-Browser Backend Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -137,7 +153,7 @@
   - `struct FBCookieImportConfig { var chromeUserDataDir: String; var edgeUserDataDir: String; var firefoxProfilesDir: String; static let `default`: ... }` (real macOS paths)
   - `final class FBBrowserCookieImporter { init(config:keyProvider: @escaping (FBBrowserKind) -> Data?); func importCookies(kind:FBBrowserKind, profile:String?) -> FBResult<ImportResult>; struct ImportResult { var cookies: [FBImportedCookie]; var skippedAppBound: Int; var skippedOther: Int } }`
   - Chromium paths probed: `<dir>/<profile>/Network/Cookies`, then `<dir>/<profile>/Cookies` (`profile` default `"Default"`); DB copied to temp first (WAL sidecar too).
-  - Chrome epoch: `expires_utc/1_000_000 - 11644473600`, <= now -> empty expires (session cookie).
+  - Chrome epoch: `expires_utc/1_000_000 - 11644473600`, at-or-before now -> empty expires (session cookie).
 - [ ] Step 1: Failing tests (build fixture SQLite DBs with `SQLite3` in the test): chromium row mapping incl. leading-dot host and encrypted v10 value (encrypt via test helper using Task 5 primitives), v20 row -> counted appBound, plaintext value row -> imported; firefox row mapping + sameSite 0/1/2 -> unset/lax/strict; missing dir -> `.credentialNotFound` style failure with zero counts; `profile` path preference order (Network/Cookies first).
 - [ ] Step 2: FAIL.
 - [ ] Step 3: Implement readers + mappings + temp copy.

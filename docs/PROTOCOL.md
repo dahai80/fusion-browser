@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/api-reference
+product: fusion-browser
+class: app
+entry: service
+doc_type: api-reference
+title: { zh: "UDS/CDP 协议说明", en: "UDS/CDP protocol reference" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/PROTOCOL.md
+---
+
 # Wire Protocol Reference
 
 > fusion-browser UDS + CDP wire contract. Schema source of truth: `Sources/FusionBrowser/Protocol.swift`.

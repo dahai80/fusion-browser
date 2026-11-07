@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/readme
+product: fusion-browser
+class: app
+entry: service
+doc_type: readme
+title: { zh: "fusion-browser 产品说明", en: "fusion-browser README" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README.md
+---
+
 # fusion-browser
 
 > Doc version: Phase 4 production-hardening landed (2026-08-26)
@@ -156,7 +172,7 @@ by the harness not a unit test, per ARCH-3).
 - R-9 soft timeout (known limitation): no public WKWebView API cancels a running `evaluateJavaScript`/snapshot mid-flight, so the watchdog is cooperative — it sets a cancel flag checked at dispatch entry (before the webview is touched) and JOINs the in-flight block. A timeout thus bounds the caller to **≤2×timeoutMs** worst case (the initial wait + a join wait of equal length), not a hard mid-action kill. The join is deliberate: it prevents a leaked block from touching a session the caller already gave up on (mid-close/rebuild). Documented per the 0828 audit R-9 acceptance criterion; not a correctness gap, a budget honesty note.
 
 **Phase 2 landed**
-- T2.1 AXTree extractor: injected JS walker extracts DOM, structural fingerprint (tag + attribute subset + docPath) + JS-side `window.__fbMap` WeakRef<Node> stable mapping, `eN` synthetic locator; Markdown reduction (interactive nodes one line each, drop non-essential fields); stale `eN` returns `node_stale`
+- T2.1 AXTree extractor: injected JS walker extracts DOM, structural fingerprint (tag + attribute subset + docPath) + JS-side `window.__fbMap` `WeakRef<Node>` stable mapping, `eN` synthetic locator; Markdown reduction (interactive nodes one line each, drop non-essential fields); stale `eN` returns `node_stale`
 - T2.2 anti-injection sanitizer: static hidden-vector rule catalog (display:none/visibility:hidden/opacity:0/font-size:0/aria-hidden/hidden/offscreen/text-indent/scale/filter-opacity/color=bg/covered-overlay) + post-render measurement (`getBoundingClientRect` size 0/offscreen + `elementFromPoint` hit); purge strips text only, keeps node structure (zero false-kill); adversarial test set + deterministic unit tests cover 100% interception
 - T2.3 CDP compat layer: `:9222` CDP-WS shim (NOT real Chrome, a translation layer), POSIX TCP + HTTP discovery (`/json`/`/json/version`/`/json/new`/`/json/close`) + RFC 6455 WS frame codec (SHA1 Sec-WebSocket-Accept), `FBCDPTranslator` translates Page/Runtime/Accessibility/Input/DOM methods into `FBActionDriver` actions + AXTree extract; aligned to cowork `cdp_client.py` contract (`result.result.value`/`result.nodes[...].backendNodeId`/`result.data`/`result.frameId`); non-whitelisted EVALUATE rejected; default off (`cdpEnabled`)
 - T2.4 credential closure: Keychain stores **full cookie attributes** (name/value/domain/path/expires/secure/httponly/samesite), account=domain, injected into the session in-memory `httpCookieStore`; LLM gets only `credential_injected:bool` (plaintext never leaves Keychain/memory); `type=password` input values masked to `********` in AXTree; locked screen returns `credential_locked`; credential audit log records op/result only, never the value; NFR-S2/D11 retain by default, `logout` deletes

@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "fusion-browser 全面审视报告（2026-10-16）", en: "fusion-browser 全面审视报告（2026-10-16）" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - audit/fusion-browser-audit-1016.md
+---
+
 # fusion-browser 全面审视报告（2026-10-16）
 
 - 审视对象：`/Users/dahai/fusion/fusion-browser`（HEAD `95bc0a8`，v0.2.1，main 分支）
@@ -158,7 +174,7 @@ P-1 的修复：捕获 `socket.timeout`/`OSError` 一律 `close()` 后抛错；l
 | T-2 | `perf_multipage.py:215-222` scored 页数无下限：10 页中 9 页 extract 0 节点被 excluded，剩 1 页也能算 P50 并 PASS，R-7 SLA 门禁可被"排除"掏空，违反脚本自述的 anti-false-pass 原则 | P1 |
 | T-3 | SessionManager 并发测试只断言"不崩"，不断言无残留条目/容量归零 | P2 |
 | T-4 | Framing 溢出/背压的真实 socket 行为可做成确定性单测（不需要 WKWebView，不受 ARCH-3 约束）但未做 | P2 |
-| T-5 | `verify_gateway_r10.py`（唯一证明 gateway↔browser 容量面打通的端到端 harness）不在任何 gate 中 | P2 |
+| T-5 | `verify_gateway_r10.py`（唯一证明 gateway↔browser 容量面连通的端到端 harness）不在任何 gate 中 | P2 |
 
 ### 测试质量
 

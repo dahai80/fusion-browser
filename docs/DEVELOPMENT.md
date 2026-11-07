@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "贡献者指南", en: "Contributor guide" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/DEVELOPMENT.md
+---
+
 # Development Guide
 
 > fusion-browser — contributor conventions and hard constraints.
