@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.2.4
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - audit/fusion-browser-audit-1016.md
 ---
