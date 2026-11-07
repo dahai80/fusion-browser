@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/readme
+product: fusion-browser
+class: app
+entry: service
+doc_type: readme
+title: { zh: "fusion-browser 产品说明（中文）", en: "fusion-browser README (Chinese)" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 # fusion-browser
 
 > 文档版本：Phase 4 生产化加固落地（2026-08-26）
@@ -46,7 +62,7 @@ Phase 1 引擎基座 + 六大基础设施 + Phase 2 四任务（AXTree 提炼器
 - R-9 软超时（已知限制）：WKWebView 无公开 API 中途取消正在执行的 `evaluateJavaScript`/snapshot，故 watchdog 为协作式——设取消标志，仅在派发入口（触及 webview 前）检查，并 JOIN 在飞 block。超时将调用方约束在 **≤2×timeoutMs** 最坏预算（初次等待 + 等长 join 等待），非中途硬杀。join 是刻意的：防泄漏 block 触碰调用方已放弃的会话（mid-close/rebuild）。按 0828 审计 R-9 验收标准标注；非正确性缺陷，是预算诚实声明。
 
 **Phase 2 已落地**
-- T2.1 AXTree 提炼器：注入 JS walker 抽 DOM，结构指纹（tag + 属性子集 + docPath）+ JS 侧 `window.__fbMap` WeakRef<Node> 稳定映射，`eN` 合成定位；Markdown 降维（交互节点一行一项，弃非必要字段）；`eN` 失效返 `node_stale`
+- T2.1 AXTree 提炼器：注入 JS walker 抽 DOM，结构指纹（tag + 属性子集 + docPath）+ JS 侧 `window.__fbMap` `WeakRef<Node>` 稳定映射，`eN` 合成定位；Markdown 降维（交互节点一行一项，弃非必要字段）；`eN` 失效返 `node_stale`
 - T2.2 反注入 Sanitizer：静态隐藏向量规则目录（display:none/visibility:hidden/opacity:0/font-size:0/aria-hidden/hidden/offscreen/text-indent/scale/filter-opacity/color=bg/covered-overlay）+ 渲染后实测（`getBoundingClientRect` 尺寸 0/离屏 + `elementFromPoint` 命中）；purge 仅抹文本保留节点结构（零误杀）；对抗测试集 + 确定性单元测试覆盖 100% 拦截
 - T2.3 CDP 兼容层：`:9222` CDP-WS shim（非真 Chrome，翻译层），POSIX TCP + HTTP 发现（`/json`/`/json/version`/`/json/new`/`/json/close`）+ RFC 6455 WS 帧编解码（SHA1 Sec-WebSocket-Accept），`FBCDPTranslator` 把 Page/Runtime/Accessibility/Input/DOM 方法翻成 `FBActionDriver` 动作 + AXTree 提炼；对齐 cowork `cdp_client.py` 契约（`result.result.value`/`result.nodes[...].backendNodeId`/`result.data`/`result.frameId`）；非白名单 EVALUATE 拒绝；默认关（`cdpEnabled`）
 - T2.4 凭据闭环：Keychain 存**完整 cookie 属性**（name/value/domain/path/expires/secure/httponly/samesite），account=domain，注入到 session 内存态 `httpCookieStore`；LLM 仅得 `credential_injected:bool`（明文永不离开 Keychain/内存）；`type=password` 输入框值在 AXTree 脱敏为 `********`；锁屏返 `credential_locked`；凭据审计日志只记 op/result 不含明文；NFR-S2/D11 默认保留、`logout` 删除

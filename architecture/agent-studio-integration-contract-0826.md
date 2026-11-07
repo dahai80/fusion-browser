@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "fusion-agent-studio ↔ fusion-browser 对接契约", en: "fusion-agent-studio ↔ fusion-browser 对接契约" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - architecture/agent-studio-integration-contract-0826.md
+---
+
 # fusion-agent-studio ↔ fusion-browser 对接契约
 
 > 版本：v1.0 (2026-08-26)

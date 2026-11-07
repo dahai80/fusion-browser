@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "Cowork 托管浏览器后端契约", en: "Cowork managed browser backend contract" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/cowork-managed-backend-contract.md
+---
+
 # fusion-cowork managed-browser backend contract
 
 > Issue #25. This is the frozen contract fusion-cowork codes against; the wire

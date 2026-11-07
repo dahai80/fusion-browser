@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "多节点契约", en: "Multi-node contract" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/multinode-contract.md
+---
+
 # Multi-node Capacity Contract (H-9 / R-10)
 
 fusion-browser is a **non-persistent single-node** WKWebView automation engine (FR-04).

@@ -1,3 +1,19 @@
+---
+doc_id: fusion-browser/guide
+product: fusion-browser
+class: app
+entry: service
+doc_type: guide
+title: { zh: "Design: fusion-browser as Managed-Browser Backend for fusion-cowork (Issue #25)", en: "Design: fusion-browser as Managed-Browser Backend for fusion-cowork (Issue #25)" }
+audience: engineer
+status: draft
+version: 0.2.4
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/superpowers/specs/2026-10-21-cowork-managed-backend-design.md
+---
+
 # Design: fusion-browser as Managed-Browser Backend for fusion-cowork (Issue #25)
 
 > STATUS: DRAFT — pending partner approval.
