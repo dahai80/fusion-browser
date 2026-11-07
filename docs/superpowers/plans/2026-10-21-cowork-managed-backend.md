@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.2.4
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - docs/superpowers/plans/2026-10-21-cowork-managed-backend.md
 ---
