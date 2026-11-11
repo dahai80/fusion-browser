@@ -3,10 +3,15 @@ doc_id: fusion-browser/guide
 product: fusion-browser
 class: app
 entry: service
-doc_type: design-review
-title: CDP event-buffer daemon pattern (browser-use 1.0 ax.py) — adopt/adapt/reject
-status: accepted
-date: 2026-11-12
+doc_type: guide
+title: { zh: "Design review: browser-use CDP event-buffer daemon pattern (ax.py) — adopt/adapt/reject", en: "Design review: browser-use CDP event-buffer daemon pattern (ax.py) — adopt/adapt/reject" }
+audience: engineer
+status: draft
+version: 0.2.5
+updated: 2026-11-12
+owner: "@dahai"
+source_of_truth:
+  - docs/superpowers/specs/2026-11-12-cdp-event-buffer-daemon-review.md
 issue: dahai80/fusion-browser#39
 ---
 
