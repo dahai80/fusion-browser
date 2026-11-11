@@ -104,6 +104,12 @@ jobs:
         # non-interactive Keychain (errSecInteractionNotAllowed on the credential
         # tests), and the suite is already covered by build-and-test.
         run: |
+          # cdp_dom_smoke.py + cdp_event_smoke.py need websocket-client (the only
+          # non-stdlib dep in the gate). Install here so the runner env stays
+          # self-healing — a rebuilt runner wiped it once (2026-11-12: "FATAL:
+          # pip install websocket-client" failed the gate at step 4 of 11).
+          python3 -m pip install --quiet websocket-client \
+            || { echo "::error::pip install websocket-client failed"; exit 1; }
           chmod +x scripts/release_gate.sh
           if [[ "$SKIP_UMA" == "1" ]]; then
             # No fusion-mlx -> drop the one MLX-dependent harness (uma_coexist).
