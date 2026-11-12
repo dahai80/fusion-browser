@@ -104,6 +104,19 @@ jobs:
         # non-interactive Keychain (errSecInteractionNotAllowed on the credential
         # tests), and the suite is already covered by build-and-test.
         run: |
+          # cdp_dom_smoke/cdp_event_smoke need websocket-client; perf_multipage
+          # needs tiktoken (R-7 SLA token metric). Install into a job-scoped
+          # venv — the
+          # runner host python is PEP 668 externally-managed after the Nov-7
+          # rebuild (plain pip refuses; --break-system-packages would pollute
+          # the host), and a rebuilt runner previously wiped the package
+          # (2026-11-12: "FATAL: pip install websocket-client" failed the gate
+          # at step 4 of 11). PATH-prepend so release_gate.sh's internal
+          # `python3` calls use the same venv.
+          python3 -m venv "$RUNNER_TEMP/gate-venv"
+          export PATH="$RUNNER_TEMP/gate-venv/bin:$PATH"
+          python3 -m pip install --quiet websocket-client tiktoken \
+            || { echo "::error::pip install websocket-client tiktoken failed"; exit 1; }
           chmod +x scripts/release_gate.sh
           if [[ "$SKIP_UMA" == "1" ]]; then
             # No fusion-mlx -> drop the one MLX-dependent harness (uma_coexist).

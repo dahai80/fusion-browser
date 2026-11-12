@@ -244,6 +244,48 @@ final class CDPEventEmitterTests: XCTestCase {
         return box.frames.compactMap { $0["method"] as? String }
     }
 
+    // Issue #39 regression pin: two concurrent client connections must not bleed
+    // events into each other, and subscribe semantics must be exact — a connection
+    // that did not enable a domain receives none of it; a subscribed connection
+    // receives EVERY pushed event of its enabled domains (no silent loss).
+    func testTwoConnectionsEventIsolation() {
+        let (emA, boxA) = makeEmitter()
+        let (emB, boxB) = makeEmitter()
+        // A subscribes to Page+Network; B subscribes to Network only.
+        emA.applyDomainEnable(method: "Page.enable")
+        emA.applyDomainEnable(method: "Network.enable")
+        emB.applyDomainEnable(method: "Network.enable")
+
+        emA.pushNavigateEvents(url: "https://a.example.com",
+                               response: (status: 200, mime: "text/html", headers: [:]))
+        // (a) no cross-connection bleed: B's socket received nothing from A's nav.
+        XCTAssertTrue(boxB.frames.isEmpty, "A's events bled into B: \(methods(boxB))")
+        // (c) no silent loss: A received the full subscribed burst.
+        let mA = methods(boxA)
+        XCTAssertTrue(mA.contains("Page.frameNavigated"))
+        XCTAssertTrue(mA.contains("Network.requestWillBeSent"))
+        XCTAssertTrue(mA.contains("Network.loadingFinished"))
+
+        // (b) subscribe semantics: B pushed its OWN nav events (its session), and a
+        // Page-domain event exists only for A — B must not receive Page.frameNavigated
+        // even though it is subscribed on its own connection for Network.
+        emB.pushNavigateEvents(url: "https://b.example.com",
+                               response: (status: 200, mime: "text/html", headers: [:]))
+        let mB = methods(boxB)
+        XCTAssertEqual(mB.filter { $0 == "Network.requestWillBeSent" }.count, 1, "B network events lost or duplicated: \(mB)")
+        XCTAssertFalse(mB.contains("Page.frameNavigated"), "B got Page events without Page.enable")
+        // A must not see B's nav either.
+        XCTAssertFalse(methods(boxA).contains("https://b.example.com") || boxA.frames.contains {
+            ($0["params"] as? [String: Any])?["documentURL"] as? String == "https://b.example.com"
+        }, "B's events bled into A")
+
+        // Exact-once: no duplicated frames within either connection.
+        for (name, box) in [("A", boxA), ("B", boxB)] {
+            let keys = box.frames.map { "\($0["method"] ?? "")|\($0["params"] ?? [:])" }
+            XCTAssertEqual(Set(keys).count, keys.count, "\(name) received duplicate frames")
+        }
+    }
+
     // Acceptance: after Page.enable + Network.enable + navigate, push the full event
     // set in real-Chrome order (E-11/Finding 10): Network trio first, then Page lifecycle.
     func testNavigatePushesLifecycleAndNetworkEvents() {
